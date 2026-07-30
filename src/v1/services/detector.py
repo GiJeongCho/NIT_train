@@ -245,7 +245,7 @@ def get_detector(model: Optional[str] = None) -> Detector:
 def list_weights() -> List[dict]:
     """자동 라벨/학습에 쓸 수 있는 가중치 목록.
 
-    - `test_model/` : 사전학습 기본 가중치(기본값 yolo26l.pt)
+    - `test_model/` : 사전학습 기본 가중치(기본값 yolo26l-obb.pt)
     - `workspace/models/` : 승격된 배포 후보
     - `workspace/runs/*/train/weights/` : 학습 산출물(best/last)
     """

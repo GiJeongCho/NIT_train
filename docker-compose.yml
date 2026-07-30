@@ -1,0 +1,29 @@
+services:
+  nit-train:
+    build: .
+    image: nit-train:latest
+    container_name: nit-train
+    ports:
+      - "8888:8888"
+    volumes:
+      # 모든 작업 상태. 이것만 보존하면 컨테이너를 갈아끼워도 라벨링/학습 결과가 남는다.
+      - ./workspace:/app/workspace
+      # 사전학습 가중치. 이미지에 굽지 않고 마운트하면 모델 교체 시 재빌드가 필요 없다.
+      - ./test_model:/app/test_model
+    environment:
+      NIT_TRAIN_DEVICE: "0"
+      # Windows 가 아니어도 워커가 많으면 RAM 을 크게 문다. 컨테이너 메모리 한도에 맞춰 조정.
+      NIT_TRAIN_WORKERS: "4"
+      # 승격 모델을 추론 서비스로 배포하려면 그 models 폴더를 마운트하고 여기에 지정한다.
+      # NIT_TRAIN_TRACKER_MODELS_DIR: /mnt/tracker-models
+      # NIT_TRAIN_TRACKER_API: http://tracker-py:8886
+    # 학습 DataLoader 워커는 공유메모리를 쓴다. 기본 64MB 면 후반 epoch 에서 죽는다.
+    shm_size: "8gb"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

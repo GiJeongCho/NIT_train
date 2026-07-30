@@ -97,7 +97,12 @@ class Settings:
     # 사전학습 가중치 보관 폴더(기본 모델이 여기 있다).
     model_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "test_model")
     # 학습/자동라벨의 기본 가중치. 사용자가 별도 지정하지 않으면 항상 이 파일.
-    base_model: Path = field(default_factory=lambda: PROJECT_ROOT / "test_model" / "yolo26l.pt")
+    #
+    # OBB 가중치를 기본으로 쓴다. 목표 산출물이 `train_data/preprocessed_obb` 와 같은
+    # 회전박스 데이터셋이고, 축정렬 모델(yolo26l.pt)로는 회전 초안을 만들 수 없다.
+    # 사전학습 클래스도 DOTA 항공영상 계열이라 드론 영상에 훨씬 잘 맞는다.
+    # 축정렬로 가려면 NIT_TRAIN_BASE_MODEL=yolo26l.pt + NIT_TRAIN_TASK=detect.
+    base_model: Path = field(default_factory=lambda: PROJECT_ROOT / "test_model" / "yolo26l-obb.pt")
 
     # ── 추론(자동 라벨 초안) ───────────────────────────────────────────
     device: str = "0"                 # CUDA 인덱스 또는 "cpu"
@@ -125,6 +130,9 @@ class Settings:
 
     # ── 데이터셋 ───────────────────────────────────────────────────────
     class_names: list = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
+    # 기본 태스크. obb = 회전박스(8좌표), detect = 축정렬(cxcywh).
+    # `tracker_py/train_data/preprocessed_obb` 와 같은 구조가 목표 산출물이므로 obb.
+    dataset_task: str = "obb"
     split_train: float = 0.8
     split_valid: float = 0.15
     split_test: float = 0.05
@@ -172,7 +180,7 @@ class Settings:
             workspace_dir=workspace,
             upload_dir=_env_path("NIT_TRAIN_UPLOAD_DIR", workspace / "uploads"),
             model_dir=model_dir,
-            base_model=_env_path("NIT_TRAIN_BASE_MODEL", model_dir / "yolo26l.pt"),
+            base_model=_env_path("NIT_TRAIN_BASE_MODEL", model_dir / "yolo26l-obb.pt"),
             device=_env_str("NIT_TRAIN_DEVICE", "0"),
             autolabel_conf=_env_float("NIT_TRAIN_AUTOLABEL_CONF", 0.25),
             autolabel_iou=_env_float("NIT_TRAIN_AUTOLABEL_IOU", 0.7),
@@ -188,6 +196,7 @@ class Settings:
             frame_width=_env_int("NIT_TRAIN_FRAME_WIDTH", 640),
             frame_height=_env_int("NIT_TRAIN_FRAME_HEIGHT", 480),
             class_names=_env_list("NIT_TRAIN_CLASS_NAMES", DEFAULT_CLASS_NAMES),
+            dataset_task=_env_str("NIT_TRAIN_TASK", "obb").lower(),
             split_train=_env_float("NIT_TRAIN_SPLIT_TRAIN", 0.8),
             split_valid=_env_float("NIT_TRAIN_SPLIT_VALID", 0.15),
             split_test=_env_float("NIT_TRAIN_SPLIT_TEST", 0.05),

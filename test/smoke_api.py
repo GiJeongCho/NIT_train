@@ -172,24 +172,43 @@ def main() -> int:
         check("승인 상태 반영", r.json().get("status") == "approved")
 
         # 미확정 클래스가 있으면 승인이 거부돼야 한다(핵심 안전장치).
-        others = [it["frame_id"] for it in items if it["frame_id"] != first]
-        if others and any(it["n_unresolved"] > 0 for it in items):
-            target = next(it["frame_id"] for it in items if it["n_unresolved"] > 0)
+        target = next((it["frame_id"] for it in items
+                       if it["frame_id"] != first and it["n_unresolved"] > 0), None)
+        if target:
             r = client.post(f"/api/videos/{video_id}/frames/{target}/status",
                             json={"status": "approved"})
-            check("미확정 클래스 승인 거부", r.status_code == 400, f"{r.status_code}")
+            check("미확정 클래스 승인 거부", r.status_code == 400,
+                  f"{r.status_code} {r.text[:120]}")
+        else:
+            print("       (미확정 객체가 없어 거부 검증 생략)")
 
-        print("\n[7] 나머지 프레임 라벨링(전파 + 일괄 승인)")
+        print("\n[7] 객체 단위 클래스 전파")
         r = client.get(f"/api/videos/{video_id}/tracks")
         tracks = r.json()["items"]
         print(f"       track {len(tracks)}개: {[t['track_id'] for t in tracks][:8]}")
+        propagated = 0
         for t in tracks:
-            client.post(f"/api/videos/{video_id}/propagate",
-                        json={"track_id": t["track_id"], "class_name": cls})
+            r = client.post(f"/api/videos/{video_id}/propagate",
+                            json={"track_id": t["track_id"], "class_name": cls})
+            propagated += r.json().get("objects", 0)
+        check("track 기반 전파 동작", not tracks or propagated > 0, f"{propagated}개 객체")
+
+        print("\n[8] 남은 미확정 객체 수동 지정 + 일괄 승인")
+        r = client.get(f"/api/videos/{video_id}/frames?limit=1000")
+        for it in r.json()["items"]:
+            if it["n_unresolved"] == 0:
+                continue
+            doc = client.get(f"/api/videos/{video_id}/frames/{it['frame_id']}").json()
+            objs = [{"class_name": o.get("class_name") or cls, "poly": o["poly"],
+                     "track_id": o.get("track_id"), "score": o.get("score")}
+                    for o in doc["objects"]]
+            client.put(f"/api/videos/{video_id}/frames/{it['frame_id']}",
+                       json={"objects": objs})
         # 자동 라벨이 못 잡은(객체 0개) 프레임도 배경 샘플로 승인된다.
         r = client.post(f"/api/videos/{video_id}/frames/status", json={"status": "approved"})
         check("일괄 승인", r.status_code == 200, r.text[:200])
         print(f"       {r.json()['updated']}장 승인, 실패 {len(r.json()['failed'])}장")
+        check("전 프레임 승인", len(r.json()["failed"]) == 0, str(r.json()["failed"][:1]))
 
         r = client.get(f"/api/videos/{video_id}/progress")
         prog = r.json()
@@ -197,7 +216,7 @@ def main() -> int:
               f"객체 {prog['objects']}개, 미확정 {prog['unresolved_objects']}개")
         check("승인된 프레임 존재", prog["approved"] > 0)
 
-        print("\n[8] 데이터셋 빌드")
+        print("\n[9] 데이터셋 빌드")
         r = client.post("/api/datasets", json={
             "name": "smoke", "video_ids": [video_id], "task": "detect",
             "splits": {"train": 0.6, "valid": 0.4, "test": 0.0},
@@ -235,7 +254,7 @@ def main() -> int:
         for line in yaml_text.strip().splitlines():
             print(f"       {line}")
 
-        print("\n[9] OBB 태스크 데이터셋(8좌표) 검증")
+        print("\n[10] OBB 태스크 데이터셋(8좌표) 검증")
         r = client.post("/api/datasets", json={
             "name": "smoke-obb", "video_ids": [video_id], "task": "obb",
             "splits": {"train": 1.0, "valid": 0.0, "test": 0.0},
@@ -248,14 +267,14 @@ def main() -> int:
             cols = len(sample.read_text(encoding="utf-8").strip().split("\n")[0].split())
             check("obb 라벨 컬럼 수(9)", cols == 9, f"{cols} cols")
 
-        print("\n[10] 모델 목록")
+        print("\n[11] 모델 목록")
         r = client.get("/api/models")
         check("GET /api/models", r.status_code == 200)
         weights = r.json()["weights"]
         print(f"       가중치 {len(weights)}개: {[w['name'] for w in weights][:5]}")
 
         if args.train:
-            print("\n[11] 학습 1 epoch")
+            print("\n[12] 학습 1 epoch")
             r = client.post("/api/train", json={
                 "dataset_id": dataset_id, "epochs": 1, "batch": 2, "workers": 0,
             })

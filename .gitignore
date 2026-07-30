@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+
+# 작업 산출물 — 전부 워크스페이스 안에 모인다(용량이 크고 재생성 가능).
+workspace/
+runs/
+outputs/
+
+# 가중치/엔진 캐시
+*.engine
+*.onnx
+# test_model/ 의 사전학습 가중치는 배포에 필요하므로 예외로 둘지 프로젝트 정책에 따른다.
+# 기본은 제외(수십~수백 MB).
+*.pt

@@ -1,0 +1,5 @@
+# 개발/테스트 전용. 운영 이미지에는 넣지 않는다.
+-r requirements.txt
+
+# FastAPI TestClient(starlette)가 요구. test/smoke_api.py 에서 사용.
+httpx==0.28.1

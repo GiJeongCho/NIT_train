@@ -1,0 +1,23 @@
+# NIT_train — 학습/라벨링 API 의존성
+#
+# 이 앱이 직접 import 하는 것만 담는다.
+# torch / torchvision(GPU 스택)은 conda 환경 또는 도커 base 이미지(ultralytics)가 제공한다.
+
+fastapi==0.119.0
+uvicorn[standard]==0.37.0
+python-multipart==0.0.32
+pydantic==2.13.4
+
+ultralytics==8.4.37
+opencv-python==4.12.0.88
+numpy==2.0.1
+
+# 기존 YOLO 데이터셋 폴더 등록 시 data.yaml 파싱 (ultralytics 의존성이지만 명시)
+PyYAML==6.0.2
+
+# ultralytics 트래커(BoT-SORT)의 선형 할당.
+# 없으면 첫 track() 호출에서 pip 설치를 시도해 폐쇄망 배포에서 실패한다.
+lap==0.5.13
+
+# 학습 자식 프로세스 생존 확인
+psutil==7.2.2

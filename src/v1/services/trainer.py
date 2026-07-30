@@ -6,7 +6,7 @@ services/trainer.py
 요청 검증 · 프로세스 기동/중단 · 상태 집계만 한다.
 
 `test/yolo.py` 의 검증된 하이퍼파라미터(epochs=100 / imgsz=640 / batch=16 /
-workers=4)를 기본값으로 쓰고, 기본 가중치는 `test_model/yolo26l.pt` 다.
+workers=4)를 기본값으로 쓰고, 기본 가중치는 `test_model/yolo26l-obb.pt` 다(회전박스 학습).
 
 run 폴더::
 

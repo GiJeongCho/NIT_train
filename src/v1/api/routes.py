@@ -25,7 +25,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Body, File, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.config import get_settings
 from core import store
@@ -85,6 +85,7 @@ async def meta() -> JSONResponse:
         "segment_kinds": list(segments_svc.KINDS),
         "label_statuses": list(annotations.STATUSES),
         "dataset_tasks": list(dataset_svc.TASKS),
+        "default_task": s.dataset_task,
         "split_modes": list(dataset_svc.SPLIT_MODES),
         "defaults": {
             "extract": {"fps": s.extract_fps, "conf": s.autolabel_conf,
@@ -94,6 +95,7 @@ async def meta() -> JSONResponse:
                       "height": s.frame_height},
             "dataset": {"splits": s.splits(), "split_mode": s.split_mode,
                         "chunk_size": s.split_chunk_size,
+                        "task": s.dataset_task,
                         "only_approved": s.dataset_only_approved},
             "train": {"epochs": s.train_epochs, "imgsz": s.train_imgsz,
                       "batch": s.train_batch, "workers": s.train_workers,
@@ -343,7 +345,7 @@ async def get_selection(
 class ExtractRequest(BaseModel):
     kinds: List[str] = Field(default_factory=lambda: ["normal"], description="추출할 구간 종류")
     fps: Optional[float] = Field(None, description="초당 추출 장수 (0=모든 프레임)")
-    model: Optional[str] = Field(None, description="자동 라벨에 쓸 가중치 (기본 test_model/yolo26l.pt)")
+    model: Optional[str] = Field(None, description="자동 라벨에 쓸 가중치 (기본 test_model/yolo26l-obb.pt)")
     conf: Optional[float] = Field(None, ge=0, le=1)
     iou: Optional[float] = Field(None, ge=0, le=1)
     imgsz: Optional[int] = Field(None, ge=32)
@@ -537,8 +539,15 @@ async def delete_frame(video_id: str, frame_id: str) -> JSONResponse:
 # ══════════════════════════════════════════════════════════════════════
 class DatasetRequest(BaseModel):
     name: Optional[str] = Field(None, description="사람이 알아볼 이름")
-    video_ids: Optional[List[str]] = Field(None, description="학습에 쓸 영상들. 생략 시 전체")
-    task: str = Field("detect", description="detect | obb — 학습할 모델의 태스크와 일치해야 함")
+    video_ids: Optional[List[str]] = Field(None, description="학습에 쓸 영상들. 생략 시 전체, []=영상 없이 병합만")
+    task: Optional[str] = Field(None, description="obb | detect — 생략 시 서버 기본값(obb)")
+    base_datasets: Optional[List[str]] = Field(
+        None,
+        description=(
+            "같이 넣을 기존 데이터셋. dataset_id 또는 서버 폴더 경로"
+            "(예: C:/project/tracker_py/train_data/preprocessed_obb). 원래 분할 유지."
+        ),
+    )
     class_names: Optional[List[str]] = Field(None, description="생략 시 프로젝트 클래스 목록")
     include_kinds: Optional[List[str]] = Field(None, description="기본 ['normal']")
     only_approved: Optional[bool] = Field(None, description="기본 true (승인된 프레임만)")
@@ -559,14 +568,64 @@ class DatasetRequest(BaseModel):
         "학습한 데이터셋은 변하지 않는다(실험 재현성).\n"
         "- 분할 기본값 `chunk`: 연속 프레임을 블록으로 묶어 배분한다. 무작위로 나누면 "
         "train/valid 에 사실상 같은 장면이 들어가 검증 점수가 부풀려진다.\n"
-        "- 클래스가 미확정인 객체가 있는 프레임은 통째로 제외되고 `excluded` 에 집계된다.\n\n"
-        "`task` 는 학습에 쓸 가중치와 일치해야 한다(`detect`=cxcywh, `obb`=8좌표)."
+        "- 클래스가 미확정인 객체가 있는 프레임은 통째로 제외되고 `excluded` 에 집계된다.\n"
+        "- `base_datasets` 로 기존 데이터셋(또는 `train_data/preprocessed_obb` 같은 폴더)을 "
+        "같이 넣을 수 있다. 기존 자산 + 새로 라벨한 프레임을 합쳐 학습하는 실제 운용 흐름이다. "
+        "클래스는 **이름으로** 다시 매핑되고, 기존 데이터셋의 train/valid/test 분할은 그대로 유지된다.\n\n"
+        "출력은 `tracker_py/train_data/preprocessed_obb` 와 같은 구조다"
+        "(`data.yaml` + `{train,valid,test}/{images,labels}`).\n"
+        "`task` 는 학습에 쓸 가중치와 일치해야 한다(`obb`=8좌표, `detect`=cxcywh)."
     ),
 )
 async def create_dataset(req: DatasetRequest) -> JSONResponse:
     job = dataset_svc.start(req.model_dump(exclude_none=True))
     return JSONResponse({"ok": True, "job_id": job.id, "dataset_id": job.target,
                          **job.to_dict()})
+
+
+class DatasetImportRequest(BaseModel):
+    # 필드 이름은 `snapshot` 이지만 요청 본문의 키는 `copy` 다.
+    # pydantic BaseModel 에 `copy` 메서드가 있어 그대로 쓰면 이름이 가려진다(경고).
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str = Field(..., description="YOLO 데이터셋 폴더(절대 또는 워크스페이스 상대)")
+    name: Optional[str] = Field(None, description="생략 시 폴더 이름")
+    task: Optional[str] = Field(None, description="생략 시 data.yaml 의 task 또는 라벨 토큰 수로 추정")
+    class_names: Optional[List[str]] = Field(None, description="data.yaml 에 names 가 없을 때만 필요")
+    snapshot: bool = Field(False, alias="copy",
+                           description="true=워크스페이스로 복사해 스냅샷 고정")
+    link_images: Optional[bool] = Field(None, description="copy 시 하드링크 사용(기본 true)")
+
+
+@router.post(
+    "/api/datasets/import",
+    tags=[_TAG_DATASET],
+    summary="기존 YOLO 데이터셋 폴더 등록",
+    description=(
+        "이미 완성된 학습 전 구조(`tracker_py/train_data/preprocessed_obb` 등)를 그대로 "
+        "데이터셋 목록에 올린다. 다시 만들지 않고 바로 학습에 쓸 수 있다.\n\n"
+        "- `copy=false`(기본): **복사하지 않고** `data.yaml` 만 만들어 원본을 가리킨다. "
+        "수천 장을 중복 저장하지 않는다. 대신 원본이 바뀌면 데이터셋도 바뀐다.\n"
+        "- `copy=true`: 워크스페이스로 하드링크/복사해 스냅샷으로 고정하고, 클래스 id 를 "
+        "현재 프로젝트 목록 기준으로 다시 쓴다.\n\n"
+        "`data.yaml` 이 없어도 폴더 구조와 라벨 토큰 수(5=detect, 9=obb)로 태스크를 추정한다."
+    ),
+)
+async def import_dataset(req: DatasetImportRequest) -> JSONResponse:
+    spec = req.model_dump(exclude_none=True, by_alias=True)
+    return JSONResponse({"ok": True, **dataset_svc.import_dir(spec)})
+
+
+@router.get(
+    "/api/datasets/inspect",
+    tags=[_TAG_DATASET],
+    summary="폴더 미리보기 (등록 전 확인)",
+    description="등록하기 전에 그 폴더가 어떤 태스크/클래스/장수인지 읽어만 본다.",
+)
+async def inspect_dataset_dir(
+    path: str = Query(..., description="YOLO 데이터셋 폴더 경로"),
+) -> JSONResponse:
+    return JSONResponse(dataset_svc.inspect(path))
 
 
 @router.get("/api/datasets", tags=[_TAG_DATASET], summary="데이터셋 목록")
@@ -602,7 +661,7 @@ async def delete_dataset(dataset_id: str) -> JSONResponse:
 # ══════════════════════════════════════════════════════════════════════
 class TrainRequest(BaseModel):
     dataset_id: str = Field(..., description="POST /api/datasets 로 만든 데이터셋")
-    model: Optional[str] = Field(None, description="사전학습 가중치. 기본 test_model/yolo26l.pt")
+    model: Optional[str] = Field(None, description="사전학습 가중치. 기본 test_model/yolo26l-obb.pt")
     epochs: Optional[int] = Field(None, ge=1)
     imgsz: Optional[int] = Field(None, ge=32)
     batch: Optional[int] = Field(None, ge=1)
@@ -620,7 +679,7 @@ class TrainRequest(BaseModel):
     description=(
         "데이터셋과 가중치를 골라 학습을 시작한다. 기본값은 `test/yolo.py` 에서 검증된 "
         "epochs=100 / imgsz=640 / batch=16 / workers=4 이고, 기본 가중치는 "
-        "`test_model/yolo26l.pt` 다.\n\n"
+        "`test_model/yolo26l-obb.pt` 다(회전박스 학습이 기본).\n\n"
         "학습은 **API 와 분리된 자식 프로세스**에서 돈다. GPU 사고가 서비스를 같이 "
         "죽이지 않고, 중단도 프로세스 종료로 확실하게 끝난다.\n\n"
         "`workers` 를 크게 잡으면(Windows spawn) 워커마다 RAM 을 물어 후반 epoch 에서 "

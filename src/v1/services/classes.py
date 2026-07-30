@@ -5,8 +5,8 @@ services/classes.py
 프로젝트 클래스 목록(라벨 공간) 관리.
 
 자동 라벨을 만드는 모델의 클래스와 우리가 학습시키려는 클래스는 **다르다.**
-기본 가중치 `yolo26l.pt` 는 COCO 80 클래스(person/car/truck…)로 박스를 찾아주지만,
-실제 학습 목표는 표적 종류(Panther_II, VIDAR …)다. 그래서
+기본 가중치 `yolo26l-obb.pt` 는 DOTA 15 클래스(plane/ship/large-vehicle…)로 회전박스를
+찾아주지만, 실제 학습 목표는 표적 종류(Panther_II, VIDAR …)다. 그래서
 
 - 모델이 준 클래스명은 `model_class_name` 으로 **참고용**만 보관하고,
 - 라벨의 진짜 값은 이 목록에 있는 `class_name` 이다.

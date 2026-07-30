@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+
+# 작업 상태는 볼륨으로 마운트한다. 이미지에 구우면 안 된다(수십 GB).
+workspace/
+runs/
+docs/
+test/
+
+# 가중치는 test_model/ 만 COPY 한다.
+*.engine
+*.onnx

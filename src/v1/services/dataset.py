@@ -4,29 +4,44 @@ services/dataset.py
 
 검수된 라벨 → ultralytics 학습용 YOLO 데이터셋 빌드 (백그라운드 잡).
 
-산출물은 `test/yolo.py` 가 쓰던 `train_data/preprocessed_obb/` 와 같은 구조다::
+산출물은 `test/yolo.py` 가 쓰던 `tracker_py/train_data/preprocessed_obb/` 와 **같은
+구조**다. 그 폴더를 그대로 다시 만들 수 있고, 반대로 그 폴더를 그대로 읽어들일 수도
+있어야 한다는 요구를 이 모듈이 담당한다::
 
     datasets/<dataset_id>/
-    ├── data.yaml
+    ├── data.yaml              # train/val/test 경로 + names (train_data 와 동일 서식)
     ├── manifest.json          # 어떤 영상/프레임/설정으로 만들었는지(재현·감사용)
     ├── train/{images,labels}/
     ├── valid/{images,labels}/
     └── test/{images,labels}/
+
+세 가지 경로로 데이터셋이 만들어진다.
+
+1. **빌드**(`start`)      : 검수 완료된 프레임 라벨을 모아 새로 만든다.
+2. **등록**(`import_dir`) : 이미 있는 YOLO 폴더(`train_data/preprocessed_obb` 등)를
+   복사 없이 데이터셋 목록에 올린다. 그대로 학습에 쓸 수 있다.
+3. **병합**(`base_datasets`): 빌드할 때 기존 데이터셋을 같이 넣는다. 기존 5,834장에
+   새로 라벨한 프레임을 더해 학습하는 것이 실제 운용 흐름이다.
 
 핵심 설계
 - **스냅샷**: 이미지를 데이터셋 폴더로 링크/복사해 고정한다. 나중에 원본 영상이나
   라벨을 고쳐도 이미 학습한 데이터셋은 변하지 않는다(실험 재현성).
 - **누수 방지 분할**: 인접 프레임은 사실상 같은 그림이다. 무작위 분할하면
   train 과 valid 에 같은 장면이 들어가 검증 mAP 가 부풀려진다. 기본 `chunk` 모드는
-  연속 프레임을 블록으로 묶어 통째로 배분한다.
+  연속 프레임을 블록으로 묶아 통째로 배분한다. 병합해 들어온 기존 데이터셋은
+  **원래 분할을 그대로 유지**한다(train 이던 것은 train 으로).
 - **태스크별 라벨**: 같은 라벨 자산에서 `obb`(8좌표) 또는 `detect`(cxcywh) 로 쓴다.
   학습에 쓸 모델의 태스크와 반드시 일치해야 한다(`trainer` 가 검증).
+- **클래스 id 는 이름으로 맞춘다**: 병합/등록 시 원본의 클래스 인덱스를 그대로 믿지
+  않고 이름 → 현재 목록 인덱스로 다시 매핑한다. 인덱스만 맞추면 정답이 조용히
+  뒤바뀐다.
 """
 
 from __future__ import annotations
 
 import os
 import random
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -41,21 +56,27 @@ SPLITS = ("train", "valid", "test")
 SPLIT_MODES = ("chunk", "random", "video")
 TASKS = ("detect", "obb")
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+# ultralytics 관례상 valid 폴더 이름은 valid 또는 val 둘 다 쓰인다.
+_SPLIT_DIRS = {"train": ("train",), "valid": ("valid", "val"), "test": ("test",)}
+
+_TAG_RE = re.compile(r"[^A-Za-z0-9]+")
+
 
 def _resolve_spec(raw: Optional[dict]) -> dict:
     s = get_settings()
     raw = dict(raw or {})
 
+    # video_ids 를 명시적으로 [] 로 보내면 "영상 없이 기존 데이터셋만" 이라는 뜻이다.
     video_ids = [str(v) for v in (raw.get("video_ids") or [])]
-    if not video_ids:
+    if not video_ids and "video_ids" not in raw:
         video_ids = store.list_video_ids()
-    if not video_ids:
-        raise ValueError("데이터셋에 넣을 영상이 없습니다. 먼저 영상을 등록·라벨링하세요.")
     for vid in video_ids:
         if not store.video_meta_path(vid).exists():
             raise ValueError(f"등록되지 않은 영상: {vid}")
 
-    task = str(raw.get("task") or "detect").lower()
+    task = str(raw.get("task") or s.dataset_task).lower()
     if task not in TASKS:
         raise ValueError(f"task 는 {list(TASKS)} 중 하나여야 합니다: {task!r}")
 
@@ -79,6 +100,13 @@ def _resolve_spec(raw: Optional[dict]) -> dict:
 
     kinds = [str(k) for k in (raw.get("include_kinds") or ["normal"])]
 
+    sources = [_resolve_source(ref, task) for ref in (raw.get("base_datasets") or [])]
+    if not video_ids and not sources:
+        raise ValueError(
+            "데이터셋에 넣을 것이 없습니다. 영상을 등록·라벨링하거나 "
+            "base_datasets 로 기존 데이터셋을 지정하세요."
+        )
+
     return {
         "name": str(raw.get("name") or "").strip() or "dataset",
         "video_ids": video_ids,
@@ -91,9 +119,176 @@ def _resolve_spec(raw: Optional[dict]) -> dict:
         "chunk_size": int(raw.get("chunk_size") or s.split_chunk_size),
         "seed": int(raw.get("seed") if raw.get("seed") is not None else s.split_seed),
         "link_images": bool(raw.get("link_images", s.dataset_link_images)),
+        "base_datasets": sources,
     }
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 기존 YOLO 폴더 읽기 (train_data/preprocessed_obb 호환)
+# ══════════════════════════════════════════════════════════════════════
+def _norm_names(raw_names) -> List[str]:
+    """data.yaml 의 names 를 인덱스 순 리스트로. dict(0:..)/list 둘 다 받는다."""
+    if isinstance(raw_names, dict):
+        try:
+            keys = sorted(raw_names.keys(), key=lambda k: int(k))
+        except (TypeError, ValueError):
+            keys = list(raw_names.keys())
+        return [str(raw_names[k]) for k in keys]
+    if isinstance(raw_names, (list, tuple)):
+        return [str(n) for n in raw_names]
+    return []
+
+
+def _guess_task(labels_dir: Path) -> Optional[str]:
+    """라벨 파일의 토큰 수로 태스크를 추정한다. detect=5, obb=9."""
+    for p in sorted(labels_dir.glob("*.txt"))[:50]:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            n = len(line.split())
+            if n == 9:
+                return "obb"
+            if n == 5:
+                return "detect"
+    return None
+
+
+def _abs_dir(path) -> Path:
+    p = Path(str(path).strip().strip('"')).expanduser()
+    if not p.is_absolute():
+        p = store.workspace() / p
+    return p
+
+
+def read_yolo_dir(path) -> dict:
+    """YOLO 데이터셋 폴더의 구조를 읽는다(등록·병합의 공통 입구).
+
+    `train_data/preprocessed_obb` 처럼 `{train,valid,test}/{images,labels}` +
+    `data.yaml` 로 된 폴더를 대상으로 한다. data.yaml 이 없어도 폴더 구조와 라벨
+    토큰 수로 태스크를 추정한다(names 는 이 경우 알 수 없어 호출자가 줘야 한다).
+    """
+    root = _abs_dir(path)
+    if not root.is_dir():
+        raise ValueError(f"폴더를 찾을 수 없습니다: {root}")
+
+    names: List[str] = []
+    task: Optional[str] = None
+    yaml_name: Optional[str] = None
+    for cand in ("data.yaml", "data.yml", "dataset.yaml"):
+        if (root / cand).is_file():
+            yaml_name = cand
+            break
+    if yaml_name:
+        import yaml
+        doc = yaml.safe_load((root / yaml_name).read_text(encoding="utf-8")) or {}
+        if isinstance(doc, dict):
+            names = _norm_names(doc.get("names"))
+            task = str(doc.get("task") or "").strip().lower() or None
+
+    splits: Dict[str, dict] = {}
+    for split, aliases in _SPLIT_DIRS.items():
+        for alias in aliases:
+            images = root / alias / "images"
+            labels = root / alias / "labels"
+            if not images.is_dir():
+                continue
+            files = sorted(p.name for p in images.iterdir()
+                           if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+            splits[split] = {
+                "dir": alias,
+                "images": len(files),
+                "labels": len(list(labels.glob("*.txt"))) if labels.is_dir() else 0,
+            }
+            if task is None and labels.is_dir():
+                task = _guess_task(labels)
+            break
+    if not splits:
+        raise ValueError(
+            f"YOLO 데이터셋 폴더가 아닙니다(train/valid/test 하위 images 없음): {root}"
+        )
+    return {
+        "dir": root,
+        "yaml": yaml_name,
+        "names": names,
+        "task": task,
+        "splits": splits,
+        "total_images": sum(v["images"] for v in splits.values()),
+    }
+
+
+def inspect(path) -> dict:
+    """등록 전에 폴더를 미리 보여주기 위한 조회(프런트 확인용)."""
+    info = read_yolo_dir(path)
+    return {**info, "dir": info["dir"].as_posix()}
+
+
+def _resolve_source(ref: str, task: str) -> dict:
+    """`base_datasets` 항목(데이터셋 id 또는 서버 경로) → 병합 소스 정보."""
+    ref = str(ref or "").strip()
+    if not ref:
+        raise ValueError("base_datasets 항목이 비어 있습니다")
+
+    root_hint: Optional[str] = None
+    label = ref
+    try:
+        manifest = store.read_json(store.dataset_manifest_path(ref), None)
+    except ValueError:
+        manifest = None  # id 형식이 아니면 경로로 취급
+    if isinstance(manifest, dict):
+        root_hint = manifest.get("source_dir") or str(store.dataset_dir(ref))
+        label = str(manifest.get("name") or ref)
+
+    info = read_yolo_dir(root_hint or ref)
+    src_task = info["task"] or task
+    if src_task != task:
+        raise ValueError(
+            f"합칠 데이터셋의 태스크가 다릅니다 ({label}: {src_task} ≠ {task}). "
+            "회전박스(obb) 라벨과 축정렬(detect) 라벨은 한 데이터셋에 섞을 수 없습니다."
+        )
+    if not info["names"]:
+        raise ValueError(
+            f"클래스 목록을 알 수 없습니다 ({label}). data.yaml 의 names 를 채우세요."
+        )
+    return {
+        "ref": ref,
+        "name": label,
+        "dir": info["dir"].as_posix(),
+        "task": src_task,
+        "names": info["names"],
+        "splits": info["splits"],
+        "total_images": info["total_images"],
+    }
+
+
+def _class_map(src_names: List[str], target_names: List[str], label: str) -> List[int]:
+    """소스 클래스 인덱스 → 대상 인덱스. 이름으로 맞춘다."""
+    index = {n: i for i, n in enumerate(target_names)}
+    missing = [n for n in src_names if n not in index]
+    if missing:
+        raise ValueError(
+            f"'{label}' 의 클래스가 현재 목록에 없습니다: {missing}. "
+            "PUT /api/classes 로 먼저 추가하세요(순서 변경 없이 뒤에 추가)."
+        )
+    return [index[n] for n in src_names]
+
+
+def _tag_for(text: str, used: set) -> str:
+    """파일명 접두사. 소스가 여러 개여도 stem 이 겹치지 않게 한다."""
+    base = _TAG_RE.sub("-", str(text)).strip("-")[:24] or "src"
+    tag = base
+    i = 2
+    while tag in used:
+        tag = f"{base}-{i}"
+        i += 1
+    used.add(tag)
+    return tag
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 프레임 수집 / 분할
+# ══════════════════════════════════════════════════════════════════════
 def _collect(spec: dict) -> tuple:
     """데이터셋에 넣을 프레임 목록과 제외 사유를 모은다."""
     name_to_id = {n: i for i, n in enumerate(spec["class_names"])}
@@ -187,6 +382,9 @@ def _assign_splits(items: List[dict], spec: dict) -> Dict[str, List[dict]]:
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 파일 배치 / data.yaml
+# ══════════════════════════════════════════════════════════════════════
 def _place_image(src: Path, dest: Path, link: bool) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
@@ -201,24 +399,86 @@ def _place_image(src: Path, dest: Path, link: bool) -> None:
     shutil.copy2(src, dest)
 
 
-def _write_yaml(path: Path, dataset_dir: Path, spec: dict, counts: Dict[str, int]) -> None:
+def _write_yaml(path: Path, root: Path, spec: dict, counts: Dict[str, int],
+                dirs: Optional[Dict[str, str]] = None) -> None:
+    """`train_data/preprocessed_obb/data.yaml` 과 같은 서식으로 쓴다.
+
+    `path:` 를 함께 넣어 데이터셋 폴더를 옮겨도 상대 경로가 깨지지 않게 한다.
+    """
+    dirs = dirs or {k: k for k in SPLITS}
     lines = [
         f"# NIT_train 자동 생성 ({store.now_iso()})",
         f"# dataset: {spec['name']}  task: {spec['task']}",
         f"# frames: train={counts['train']} valid={counts['valid']} test={counts['test']}",
         "",
-        f"path: {dataset_dir.as_posix()}",
-        "train: train/images",
-        "val: valid/images",
+        f"path: {root.as_posix()}",
+        f"train: {dirs['train']}/images",
+        f"val: {dirs['valid']}/images",
     ]
     if counts["test"] > 0:
-        lines.append("test: test/images")
+        lines.append(f"test: {dirs['test']}/images")
     lines += ["", f"task: {spec['task']}", "", "names:"]
     for i, n in enumerate(spec["class_names"]):
         lines.append(f"  {i}: {n}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _remap_label(text: str, cmap: List[int], class_names: List[str],
+                 hist: Dict[str, int]) -> List[str]:
+    """라벨 txt 의 클래스 id 를 현재 목록 기준으로 바꿔 쓴다."""
+    out: List[str] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            cid = int(float(parts[0]))
+        except ValueError:
+            continue
+        if cid < 0 or cid >= len(cmap):
+            continue  # 소스 names 범위를 벗어난 id 는 신뢰할 수 없으므로 버린다
+        mapped = cmap[cid]
+        parts[0] = str(mapped)
+        out.append(" ".join(parts))
+        name = class_names[mapped]
+        hist[name] = hist.get(name, 0) + 1
+    return out
+
+
+def _copy_split(src_root: Path, src_dir: str, dest_root: Path, split: str, *,
+                tag: str, cmap: List[int], spec: dict, counts: Dict[str, int],
+                objects: Dict[str, int], hist: Dict[str, int],
+                job: Optional[Job] = None) -> None:
+    images = src_root / src_dir / "images"
+    labels = src_root / src_dir / "labels"
+    if not images.is_dir():
+        return
+    for img in sorted(p for p in images.iterdir()
+                      if p.is_file() and p.suffix.lower() in IMAGE_EXTS):
+        if job is not None:
+            job.check_canceled()
+        stem = f"{tag}_{img.stem}"
+        _place_image(img, dest_root / split / "images" / f"{stem}{img.suffix.lower()}",
+                     spec["link_images"])
+        src_label = labels / f"{img.stem}.txt"
+        lines: List[str] = []
+        if src_label.is_file():
+            try:
+                lines = _remap_label(src_label.read_text(encoding="utf-8", errors="replace"),
+                                     cmap, spec["class_names"], hist)
+            except OSError:
+                lines = []
+        (dest_root / split / "labels" / f"{stem}.txt").write_text(
+            ("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+        counts[split] += 1
+        objects[split] += len(lines)
+        if job is not None:
+            job.advance(1)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 빌드
+# ══════════════════════════════════════════════════════════════════════
 def start(raw_spec: Optional[dict] = None) -> Job:
     """데이터셋 빌드 잡을 시작한다."""
     spec = _resolve_spec(raw_spec)
@@ -229,16 +489,29 @@ def start(raw_spec: Optional[dict] = None) -> Job:
 
 def _run(job: Job, dataset_id: str, spec: dict) -> None:
     picked, excluded = _collect(spec)
-    if not picked:
+    sources = spec["base_datasets"]
+    if not picked and not sources:
         raise ValueError(
             "데이터셋에 넣을 프레임이 없습니다. 제외 사유: "
             + (", ".join(f"{k}×{v}" for k, v in excluded.items()) or "(대상 프레임 없음)")
         )
 
+    # 병합 소스는 클래스 매핑을 먼저 검증한다. 수천 장을 복사한 뒤 터지지 않게.
+    used_tags: set = set()
+    plans = []
+    for src in sources:
+        plans.append({
+            "src": src,
+            "tag": _tag_for(src["name"] or src["ref"], used_tags),
+            "cmap": _class_map(src["names"], spec["class_names"], src["name"] or src["ref"]),
+        })
+
     assigned = _assign_splits(picked, spec)
-    job.set_total(len(picked))
-    job.message = (f"{len(picked)}장 배치 (train={len(assigned['train'])} "
-                   f"valid={len(assigned['valid'])} test={len(assigned['test'])})")
+    merged_total = sum(p["src"]["total_images"] for p in plans)
+    job.set_total(len(picked) + merged_total)
+    job.message = (f"신규 {len(picked)}장 (train={len(assigned['train'])} "
+                   f"valid={len(assigned['valid'])} test={len(assigned['test'])})"
+                   + (f" + 기존 {merged_total}장 병합" if merged_total else ""))
 
     ddir = store.dataset_dir(dataset_id)
     for split in SPLITS:
@@ -268,6 +541,26 @@ def _run(job: Job, dataset_id: str, spec: dict) -> None:
                 class_hist[cname] = class_hist.get(cname, 0) + 1
             job.advance(1)
 
+    # 기존 데이터셋 병합. 원래 분할(train/valid/test)을 그대로 유지한다 —
+    # 남의 valid 를 내 train 으로 섞으면 과거 실험과 점수를 비교할 수 없게 된다.
+    source_report = []
+    for plan in plans:
+        src, tag = plan["src"], plan["tag"]
+        before = dict(counts)
+        job.message = f"기존 데이터셋 병합: {src['name']} ({src['total_images']}장)"
+        for split, meta in src["splits"].items():
+            _copy_split(Path(src["dir"]), meta["dir"], ddir, split, tag=tag,
+                        cmap=plan["cmap"], spec=spec, counts=counts,
+                        objects=objects, hist=class_hist, job=job)
+        source_report.append({
+            "ref": src["ref"],
+            "name": src["name"],
+            "dir": src["dir"],
+            "prefix": tag,
+            "added": {k: counts[k] - before[k] for k in SPLITS},
+            "class_map": {n: plan["cmap"][i] for i, n in enumerate(src["names"])},
+        })
+
     warnings: List[str] = []
     if counts["valid"] == 0 and spec["splits"]["valid"] > 0:
         # val 세트가 없으면 ultralytics 가 학습 중 검증을 못 해 best 선택과 조기종료가
@@ -286,6 +579,7 @@ def _run(job: Job, dataset_id: str, spec: dict) -> None:
         "name": spec["name"],
         "task": spec["task"],
         "created_at": store.now_iso(),
+        "imported": False,
         "spec": spec,
         "counts": counts,
         "objects": objects,
@@ -294,6 +588,7 @@ def _run(job: Job, dataset_id: str, spec: dict) -> None:
         "class_names": spec["class_names"],
         "class_histogram": dict(sorted(class_hist.items(), key=lambda kv: -kv[1])),
         "per_video_frames": per_video,
+        "sources": source_report,
         "excluded": excluded,
         "warnings": warnings,
         "data_yaml": store.rel_to_workspace(store.dataset_yaml_path(dataset_id)),
@@ -305,6 +600,144 @@ def _run(job: Job, dataset_id: str, spec: dict) -> None:
                    f"(train={counts['train']} valid={counts['valid']} test={counts['test']})")
 
 
+# ══════════════════════════════════════════════════════════════════════
+# 등록 (기존 폴더 → 데이터셋 목록)
+# ══════════════════════════════════════════════════════════════════════
+def _scan_objects(root: Path, splits: Dict[str, dict], names: List[str]) -> tuple:
+    """라벨을 읽어 split 별 객체 수와 클래스 분포를 센다(등록 시 현황 파악용)."""
+    objects = {k: 0 for k in SPLITS}
+    hist: Dict[str, int] = {}
+    for split, meta in splits.items():
+        labels = root / meta["dir"] / "labels"
+        if not labels.is_dir():
+            continue
+        for p in labels.glob("*.txt"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    cid = int(float(parts[0]))
+                except ValueError:
+                    continue
+                objects[split] += 1
+                key = names[cid] if 0 <= cid < len(names) else f"(id {cid})"
+                hist[key] = hist.get(key, 0) + 1
+    return objects, hist
+
+
+def import_dir(raw: Optional[dict] = None) -> dict:
+    """이미 있는 YOLO 폴더를 데이터셋으로 등록한다.
+
+    `tracker_py/train_data/preprocessed_obb` 처럼 이미 완성된 학습 전 구조를
+    다시 만들지 않고 그대로 학습에 쓰기 위한 경로다.
+
+    - `copy=false`(기본): 복사하지 않고 `data.yaml` 만 만들어 원본을 가리킨다.
+      수천 장을 중복 저장하지 않는다. 대신 원본이 바뀌면 데이터셋도 바뀐다.
+    - `copy=true`: 워크스페이스로 하드링크/복사해 스냅샷으로 고정한다.
+      클래스 id 도 현재 목록 기준으로 다시 써서 병합 가능한 상태가 된다.
+    """
+    s = get_settings()
+    raw = dict(raw or {})
+    info = read_yolo_dir(raw.get("path") or "")
+    root = info["dir"]
+
+    task = str(raw.get("task") or info["task"] or s.dataset_task).lower()
+    if task not in TASKS:
+        raise ValueError(f"task 는 {list(TASKS)} 중 하나여야 합니다: {task!r}")
+
+    src_names = [str(x) for x in (raw.get("class_names") or info["names"])]
+    if not src_names:
+        raise ValueError(
+            f"클래스 목록을 알 수 없습니다: {root}. data.yaml 에 names 를 넣거나 "
+            "class_names 를 함께 보내세요."
+        )
+
+    copy = bool(raw.get("copy", False))
+    spec = {
+        "name": str(raw.get("name") or "").strip() or root.name,
+        "task": task,
+        "class_names": src_names,
+        "link_images": bool(raw.get("link_images", s.dataset_link_images)),
+    }
+
+    dataset_id = store.new_id()
+    ddir = store.dataset_dir(dataset_id)
+    ddir.mkdir(parents=True, exist_ok=True)
+
+    counts = {k: 0 for k in SPLITS}
+    objects = {k: 0 for k in SPLITS}
+    class_hist: Dict[str, int] = {}
+
+    if copy:
+        # 등록하면서 스냅샷으로 고정한다. 클래스는 현재 프로젝트 목록에 맞춰 다시 쓴다.
+        spec["class_names"] = classes_svc.names() or src_names
+        cmap = _class_map(src_names, spec["class_names"], spec["name"])
+        for split in SPLITS:
+            (ddir / split / "images").mkdir(parents=True, exist_ok=True)
+            (ddir / split / "labels").mkdir(parents=True, exist_ok=True)
+        tag = _tag_for(spec["name"], set())
+        for split, meta in info["splits"].items():
+            _copy_split(root, meta["dir"], ddir, split, tag=tag, cmap=cmap, spec=spec,
+                        counts=counts, objects=objects, hist=class_hist)
+        yaml_root, dirs, source_dir = ddir, {k: k for k in SPLITS}, None
+    else:
+        counts.update({k: v["images"] for k, v in info["splits"].items()})
+        objects, class_hist = _scan_objects(root, info["splits"], src_names)
+        yaml_root = root
+        dirs = {k: (info["splits"].get(k, {}).get("dir") or k) for k in SPLITS}
+        source_dir = root.as_posix()
+
+    _write_yaml(store.dataset_yaml_path(dataset_id), yaml_root, spec, counts, dirs)
+
+    warnings: List[str] = []
+    if source_dir:
+        warnings.append(
+            "원본 폴더를 그대로 참조합니다(복사 안 함). 원본이 바뀌면 이 데이터셋도 "
+            "바뀝니다. 고정이 필요하면 copy=true 로 다시 등록하세요."
+        )
+    for split, meta in info["splits"].items():
+        if meta["images"] != meta["labels"]:
+            warnings.append(
+                f"{split}: 이미지 {meta['images']}장 / 라벨 {meta['labels']}개 — "
+                "짝이 맞지 않습니다(라벨 없는 이미지는 배경으로 학습됩니다)."
+            )
+    if counts["valid"] == 0:
+        warnings.append("valid 세트가 없습니다. 학습 중 검증과 best 선택이 무의미해집니다.")
+
+    manifest = {
+        "dataset_id": dataset_id,
+        "name": spec["name"],
+        "task": task,
+        "created_at": store.now_iso(),
+        "imported": True,
+        "copied": copy,
+        "source_dir": source_dir or root.as_posix(),
+        "source_yaml": info["yaml"],
+        "spec": {**spec, "path": root.as_posix(), "copy": copy},
+        "counts": counts,
+        "objects": objects,
+        "total_frames": sum(counts.values()),
+        "total_objects": sum(objects.values()),
+        "class_names": spec["class_names"],
+        "class_histogram": dict(sorted(class_hist.items(), key=lambda kv: -kv[1])),
+        "per_video_frames": {},
+        "sources": [],
+        "excluded": {},
+        "warnings": warnings,
+        "data_yaml": store.rel_to_workspace(store.dataset_yaml_path(dataset_id)),
+    }
+    store.write_json(store.dataset_manifest_path(dataset_id), manifest)
+    return manifest
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 조회 / 삭제
+# ══════════════════════════════════════════════════════════════════════
 def get(dataset_id: str) -> dict:
     doc = store.read_json(store.dataset_manifest_path(dataset_id), None)
     if not isinstance(doc, dict):
@@ -326,10 +759,21 @@ def list_datasets() -> list:
                 "total_frames": doc.get("total_frames"),
                 "total_objects": doc.get("total_objects"),
                 "class_names": doc.get("class_names"),
+                "imported": bool(doc.get("imported")),
+                "source_dir": doc.get("source_dir") if doc.get("imported") else None,
+                "n_sources": len(doc.get("sources") or []),
+                "warnings": doc.get("warnings") or [],
             })
     return out
 
 
 def delete(dataset_id: str) -> dict:
+    """워크스페이스의 데이터셋 폴더만 지운다.
+
+    복사 없이 등록한 데이터셋(`imported` + `copy=false`)은 워크스페이스에
+    data.yaml/manifest 만 있으므로 **원본 폴더는 건드리지 않는다.**
+    """
+    doc = store.read_json(store.dataset_manifest_path(dataset_id), None) or {}
     shutil.rmtree(store.dataset_dir(dataset_id), ignore_errors=True)
-    return {"dataset_id": dataset_id, "deleted": True}
+    return {"dataset_id": dataset_id, "deleted": True,
+            "source_kept": doc.get("source_dir") if doc.get("imported") else None}
