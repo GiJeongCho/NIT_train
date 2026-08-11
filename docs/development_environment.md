@@ -171,9 +171,23 @@ docker compose up --build
 |---|---|---|
 | `NIT_TRAIN_EXTRACT_FPS` | `2.0` | 초당 추출 장수 (0=모든 프레임) |
 | `NIT_TRAIN_EXTRACT_MAX_FRAMES` | `20000` | 1회 추출 상한(디스크/검수 폭주 방지) |
-| `NIT_TRAIN_FRAME_RESIZE` | `1` | 운용 스펙 해상도로 정규화 |
+| `NIT_TRAIN_FRAME_RESIZE` | `1` | 운용 스펙 해상도로 정규화(0=원본 유지). 추출 요청/영상별로도 끌 수 있음 |
 | `NIT_TRAIN_FRAME_WIDTH` / `_HEIGHT` | `640` / `480` | 정규화 해상도(추론 서비스와 동일) |
 | `NIT_TRAIN_FRAME_JPEG_QUALITY` | `92` | 저장 화질. 낮추면 디스크는 줄지만 작은 표적이 뭉갠다 |
+
+### 전처리(주/야간)
+
+저장 전에 프레임을 밝기로 주/야간 판정해, 야간이면 저조도 보정(L 채널 CLAHE + 감마)을 건다.
+자동 판정이 틀리는 영상은 '구간' 화면에서 영상별로 `day`/`night`/`off` 로 고정한다
+(`PUT /api/videos/{id}/preprocess`). 추출 요청이 값을 명시하면 그것이 최우선이다.
+
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `NIT_TRAIN_DAYNIGHT` | `auto` | `auto`(임계치) \| `day` \| `night` \| `off` |
+| `NIT_TRAIN_DAYNIGHT_THRESHOLD` | `70.0` | 평균 밝기(Y, 0~255)가 이 값보다 낮으면 야간 |
+| `NIT_TRAIN_NIGHT_CLAHE_CLIP` | `2.0` | 야간 보정 CLAHE 대비 한계(클수록 강함) |
+| `NIT_TRAIN_NIGHT_CLAHE_GRID` | `8` | CLAHE 타일 그리드(NxN) |
+| `NIT_TRAIN_NIGHT_GAMMA` | `1.15` | 야간 감마(>1 이면 어두운 영역을 밝게) |
 
 ### 데이터셋
 

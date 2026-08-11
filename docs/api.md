@@ -47,8 +47,13 @@
   "dataset_tasks": ["obb", "detect"],
   "default_task": "obb",
   "split_modes": ["chunk", "random", "video"],
+  "daynight_modes": ["auto", "day", "night", "off"],
   "defaults": {
     "extract": {"fps": 2.0, "conf": 0.25, "iou": 0.7, "imgsz": 640, "track": true},
+    "frame": {"resize": true, "width": 640, "height": 480},
+    "preprocess": {"daynight": "auto", "daynight_threshold": 70.0,
+                   "night_clahe_clip": 2.0, "night_clahe_grid": 8, "night_gamma": 1.15,
+                   "resize": true, "resize_width": 640, "resize_height": 480},
     "dataset": {"splits": {"train": 0.8, "valid": 0.15, "test": 0.05},
                 "split_mode": "chunk", "task": "obb"},
     "train": {"epochs": 100, "imgsz": 640, "batch": 16, "workers": 4}
@@ -80,7 +85,9 @@ curl -X PUT http://localhost:8888/api/classes \
 | GET | `/api/videos/{video_id}` | 상세 |
 | DELETE | `/api/videos/{video_id}` | 삭제 (프레임/라벨 포함) |
 | GET | `/api/videos/{video_id}/stream` | 재생 (HTTP Range 지원) |
-| GET | `/api/videos/{video_id}/frame?t=` | 특정 시각 프레임 JPEG |
+| GET | `/api/videos/{video_id}/frame?t=` | 특정 시각 프레임 JPEG (`preprocess=1` 로 전처리 미리보기) |
+| GET | `/api/videos/{video_id}/preprocess` | 영상별 전처리 설정 조회(+실제 적용값) |
+| PUT | `/api/videos/{video_id}/preprocess` | 영상별 전처리 설정 저장 (주/야간 고정 등) |
 
 ```bash
 curl -F "file=@drone_01.mp4" http://localhost:8888/api/videos
@@ -98,6 +105,22 @@ curl -X POST http://localhost:8888/api/videos/path \
 
 `/stream` 은 Range 요청을 직접 처리한다. `<video src>` 로 붙이면 타임라인 탐색(seek)이
 되고, 이것이 구간 지정 UI의 전제 조건이다.
+
+### 전처리(주/야간) 설정
+
+자동 주/야간 판정이 틀리는 영상은 **영상 단위로** 고정한다. 이 설정은 추출 시 기본값이
+되고, 추출 요청이 값을 명시하면 요청이 우선한다.
+
+```bash
+curl -X PUT http://localhost:8888/api/videos/$VID/preprocess \
+  -H "Content-Type: application/json" -d '{"daynight":"night","resize":true}'
+
+# 보정 전/후 미리보기 (판정 결과는 X-Daynight 헤더)
+curl -D- "http://localhost:8888/api/videos/$VID/frame?t=12&preprocess=1&daynight=auto" -o after.jpg
+```
+
+`GET .../preprocess` 는 저장값(`saved`)과 서버 기본값을 합친 실제 적용값(`effective`)을
+함께 준다. 자세한 규칙은 [`dataset_format.md`](dataset_format.md) §8.
 
 ---
 
@@ -169,6 +192,13 @@ curl -X POST http://localhost:8888/api/videos/$VID/extract \
 | `max_frames` | `20000` | 안전장치 |
 | `track` | `true` | `track_id` 부여 |
 | `overwrite` | `"skip"` | 재실행 정책 |
+| `daynight` | 영상별→서버값 | `auto`\|`day`\|`night`\|`off` (주/야간 보정). 요청이 최우선 |
+| `daynight_threshold` | `70` | `auto` 판정 밝기 임계치(0~255) |
+| `resize` | 서버값 | 해상도 다운스케일 여부. `resize_width`/`resize_height` 로 크기 지정 |
+
+전처리(주/야간 보정 + 다운스케일)는 프레임을 저장하기 전에 걸린다. 잡 결과에
+`daynight_counts`(주간/야간/보정끔 장수)와 적용된 `preprocess` 가 담긴다. 자세한 규칙은
+[`dataset_format.md`](dataset_format.md) §8.
 
 `conf` 기본값이 운영 추론보다 낮은 이유: 초안은 **사람이 지우는 게 추가하는 것보다 싸다.**
 빠뜨린 객체를 새로 그리는 비용이 오탐을 지우는 비용보다 훨씬 크다.
