@@ -153,15 +153,19 @@ def delete_video(video_id: str) -> dict:
     return {"video_id": video_id, "deleted": True}
 
 
-def fit_frame(frame, width: Optional[int] = None, height: Optional[int] = None):
+def fit_frame(frame, width: Optional[int] = None, height: Optional[int] = None,
+              *, resize: Optional[bool] = None):
     """프레임을 운용 스펙 해상도로 정규화한다.
 
     운영 추론(tracker_py)이 640x480 으로 정규화해 처리하므로, 학습 이미지도 같은
     해상도 분포여야 한다. 다른 해상도로 학습하면 실전에서 객체 크기(픽셀) 분포가
     어긋나 작은 객체 성능이 떨어진다.
+
+    `resize` 를 명시하면 서버 기본값(`frame_resize`) 대신 그 값을 쓴다(다운스케일 선택).
     """
     s = get_settings()
-    if not s.frame_resize:
+    do = s.frame_resize if resize is None else bool(resize)
+    if not do:
         return frame
     w = int(width or s.frame_width)
     h = int(height or s.frame_height)
@@ -172,8 +176,53 @@ def fit_frame(frame, width: Optional[int] = None, height: Optional[int] = None):
     return cv2.resize(frame, (w, h), interpolation=interp)
 
 
-def grab_at(video_id: str, time_sec: float, *, fit: bool = True):
-    """특정 시각의 프레임 1장. 구간 지정 UI 의 미리보기/썸네일용."""
+def get_preprocess(video_id: str) -> dict:
+    """영상별로 저장해 둔 전처리 설정(없으면 빈 dict = 서버 기본값 사용)."""
+    meta = get_meta(video_id)
+    cfg = meta.get("preprocess")
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def set_preprocess(video_id: str, cfg: Optional[dict]) -> dict:
+    """영상별 전처리 설정을 저장한다(학습 전 '구간' 단계에서 지정).
+
+    자동 주/야간 판정이 틀리는 영상은 여기서 day/night/off 로 고정한다. 저장값은
+    추출 시 기본값으로 쓰이되, 추출 요청이 값을 명시하면 요청이 우선한다.
+    """
+    from services import preprocess as pp
+
+    meta = get_meta(video_id)
+    clean: dict = {}
+    if cfg:
+        mode = cfg.get("daynight")
+        if mode is not None:
+            mode = str(mode).lower()
+            if mode not in pp.DAYNIGHT_MODES:
+                raise ValueError(f"daynight 은 {list(pp.DAYNIGHT_MODES)} 중 하나여야 합니다: {mode!r}")
+            clean["daynight"] = mode
+        for k in ("daynight_threshold", "night_clahe_clip", "night_gamma"):
+            if cfg.get(k) is not None:
+                clean[k] = float(cfg[k])
+        if cfg.get("night_clahe_grid") is not None:
+            clean["night_clahe_grid"] = int(cfg["night_clahe_grid"])
+        if cfg.get("resize") is not None:
+            clean["resize"] = bool(cfg["resize"])
+        for k in ("resize_width", "resize_height"):
+            if cfg.get(k) is not None:
+                clean[k] = int(cfg[k])
+    meta["preprocess"] = clean
+    store.write_json(store.video_meta_path(video_id), meta)
+    return clean
+
+
+def grab_at(video_id: str, time_sec: float, *, fit: bool = True,
+            preprocess: Optional[dict] = None):
+    """특정 시각의 프레임 1장. 구간 지정 UI 의 미리보기/썸네일용.
+
+    `preprocess` 를 주면(dict) 전처리(주/야간 보정 + 선택적 리사이즈)를 적용해 돌려준다.
+    구간 화면에서 "보정 전/후" 를 눈으로 비교하기 위한 경로다. 이때 반환은
+    (프레임, 판정결과) 튜플이다.
+    """
     path = source_path(video_id)
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -190,6 +239,14 @@ def grab_at(video_id: str, time_sec: float, *, fit: bool = True):
             raise ValueError("프레임을 읽을 수 없습니다")
     finally:
         cap.release()
+
+    if preprocess is not None:
+        from services import preprocess as pp
+        resolved = pp.resolve(preprocess)
+        frame, decided = pp.apply_daynight(frame, resolved)
+        frame = fit_frame(frame, resolved["resize_width"], resolved["resize_height"],
+                          resize=resolved["resize"])
+        return frame, decided
     return fit_frame(frame) if fit else frame
 
 

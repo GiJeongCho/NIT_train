@@ -27,7 +27,13 @@ import cv2
 
 from core.config import get_settings
 from core import store
-from services import annotations, jobs, segments as segments_svc, video as video_svc
+from services import (
+    annotations,
+    jobs,
+    preprocess as pp,
+    segments as segments_svc,
+    video as video_svc,
+)
 from services.detector import get_detector, resolve_model_path
 from services.jobs import Job
 
@@ -72,6 +78,15 @@ def start(video_id: str, params: Optional[dict] = None) -> Job:
     if running:
         raise ValueError(f"이 영상에 이미 실행 중인 작업이 있습니다: job {running['id']}")
 
+    # 전처리 설정 우선순위: 추출 요청 > 영상별 저장값('구간' 단계 지정) > 서버 기본값.
+    # 요청에 들어온 전처리 키만 골라 영상별 저장값 위에 덮는다.
+    saved = video_svc.get_preprocess(video_id)
+    override = {k: params[k] for k in (
+        "daynight", "daynight_threshold", "night_clahe_clip", "night_clahe_grid",
+        "night_gamma", "resize", "resize_width", "resize_height",
+    ) if params.get(k) is not None}
+    preprocess = pp.resolve({**saved, **override})
+
     spec = {
         "kinds": list(kinds),
         "fps": float(params.get("fps") if params.get("fps") is not None else s.extract_fps),
@@ -83,6 +98,7 @@ def start(video_id: str, params: Optional[dict] = None) -> Job:
         "track": bool(params.get("track", s.autolabel_track)),
         "model": str(model_path),
         "overwrite": mode,
+        "preprocess": preprocess,
     }
     return jobs.submit("extract", lambda job: _run(job, video_id, spec),
                        target=video_id, params=spec)
@@ -133,7 +149,9 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
     written = 0
     skipped = 0
     n_objects = 0
+    daynight_counts = {"day": 0, "night": 0, "off": 0}
     model_name = resolve_model_path(spec["model"]).name
+    prep = spec.get("preprocess") or pp.resolve(None)
     quality = [int(cv2.IMWRITE_JPEG_QUALITY), get_settings().frame_jpeg_quality]
 
     try:
@@ -155,7 +173,12 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
                 job.advance(1)
                 continue
 
-            frame = video_svc.fit_frame(frame)
+            # 전처리: 주/야간 보정 → (선택적) 다운스케일. 저장 이미지와 추론 입력이
+            # 같도록 이 순서로 한 번만 적용한다(라벨과 이미지가 어긋나지 않게).
+            frame, decided = pp.apply_daynight(frame, prep)
+            frame = video_svc.fit_frame(frame, prep["resize_width"], prep["resize_height"],
+                                        resize=prep["resize"])
+            daynight_counts[decided] = daynight_counts.get(decided, 0) + 1
             h, w = frame.shape[:2]
 
             dets = detector.infer(
@@ -170,12 +193,13 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
                 time_sec=target_idx / fps if fps > 0 else 0.0,
                 width=w, height=h, objects=objects,
                 segment_kind=kind, model=model_name,
+                daynight=decided, preprocess=prep,
             )
             annotations.save(video_id, frame_id, doc)
 
             written += 1
             n_objects += len(objects)
-            job.advance(1, f"{written}장 라벨링 (객체 {n_objects}개)")
+            job.advance(1, f"{written}장 라벨링 (객체 {n_objects}개, 야간 {daynight_counts['night']}장)")
     finally:
         cap.release()
 
@@ -188,7 +212,12 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
         "ranges": [[round(a, 3), round(b, 3)] for a, b in ranges],
         "model": model_name,
         "tracked": spec["track"],
+        "preprocess": prep,
+        "daynight_counts": daynight_counts,
         "progress": annotations.progress(video_id),
         "tracks": len(annotations.tracks(video_id)),
     }
-    job.message = (f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개")
+    job.message = (f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개 "
+                   f"(주간 {daynight_counts['day']} / 야간 {daynight_counts['night']}"
+                   + (f" / 보정끔 {daynight_counts['off']}" if daynight_counts['off'] else "")
+                   + ")")

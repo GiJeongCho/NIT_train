@@ -124,9 +124,21 @@ class Settings:
     frame_jpeg_quality: int = 92
     # 운용 스펙(드론 입력 640x480)에 맞춰 프레임을 정규화해 저장한다.
     # 추론 때와 같은 해상도 분포로 학습해야 실전 성능이 맞는다.
+    # 다운스케일이 싫은 경우 추출 요청/영상별 설정으로 끌 수 있다(선택).
     frame_resize: bool = True
     frame_width: int = 640
     frame_height: int = 480
+
+    # ── 전처리(주/야간) ────────────────────────────────────────────────
+    # 저장 전에 프레임을 밝기로 주/야간 판정해, 야간이면 저조도 보정(CLAHE+감마)을 건다.
+    # 기본은 자동(auto). 자동 판정이 틀리는 영상은 '구간' 단계에서 day/night/off 로 고정한다.
+    preprocess_daynight: str = "auto"   # auto | day | night | off
+    # 평균 밝기(Y, 0~255)가 이 값보다 낮으면 야간. 드론 야간영상 기준의 보수적 기본값.
+    daynight_threshold: float = 70.0
+    # 야간 보정 파라미터. L 채널 CLAHE 국소 대비 + 감마 전역 밝기.
+    night_clahe_clip: float = 2.0
+    night_clahe_grid: int = 8
+    night_gamma: float = 1.15
 
     # ── 데이터셋 ───────────────────────────────────────────────────────
     class_names: list = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
@@ -195,6 +207,11 @@ class Settings:
             frame_resize=_env_bool("NIT_TRAIN_FRAME_RESIZE", True),
             frame_width=_env_int("NIT_TRAIN_FRAME_WIDTH", 640),
             frame_height=_env_int("NIT_TRAIN_FRAME_HEIGHT", 480),
+            preprocess_daynight=_env_str("NIT_TRAIN_DAYNIGHT", "auto").lower(),
+            daynight_threshold=_env_float("NIT_TRAIN_DAYNIGHT_THRESHOLD", 70.0),
+            night_clahe_clip=_env_float("NIT_TRAIN_NIGHT_CLAHE_CLIP", 2.0),
+            night_clahe_grid=_env_int("NIT_TRAIN_NIGHT_CLAHE_GRID", 8),
+            night_gamma=_env_float("NIT_TRAIN_NIGHT_GAMMA", 1.15),
             class_names=_env_list("NIT_TRAIN_CLASS_NAMES", DEFAULT_CLASS_NAMES),
             dataset_task=_env_str("NIT_TRAIN_TASK", "obb").lower(),
             split_train=_env_float("NIT_TRAIN_SPLIT_TRAIN", 0.8),

@@ -87,12 +87,21 @@ async def meta() -> JSONResponse:
         "dataset_tasks": list(dataset_svc.TASKS),
         "default_task": s.dataset_task,
         "split_modes": list(dataset_svc.SPLIT_MODES),
+        "daynight_modes": ["auto", "day", "night", "off"],
         "defaults": {
             "extract": {"fps": s.extract_fps, "conf": s.autolabel_conf,
                         "iou": s.autolabel_iou, "imgsz": s.autolabel_imgsz,
                         "track": s.autolabel_track, "max_frames": s.extract_max_frames},
             "frame": {"resize": s.frame_resize, "width": s.frame_width,
                       "height": s.frame_height},
+            "preprocess": {"daynight": s.preprocess_daynight,
+                           "daynight_threshold": s.daynight_threshold,
+                           "night_clahe_clip": s.night_clahe_clip,
+                           "night_clahe_grid": s.night_clahe_grid,
+                           "night_gamma": s.night_gamma,
+                           "resize": s.frame_resize,
+                           "resize_width": s.frame_width,
+                           "resize_height": s.frame_height},
             "dataset": {"splits": s.splits(), "split_mode": s.split_mode,
                         "chunk_size": s.split_chunk_size,
                         "task": s.dataset_task,
@@ -231,11 +240,79 @@ async def stream_video(video_id: str, request: Request):
     "/api/videos/{video_id}/frame",
     tags=[_TAG_VIDEO],
     summary="특정 시각 프레임(JPEG)",
-    description="구간을 찍을 때 쓰는 미리보기/썸네일. `t` 는 초 단위.",
+    description=(
+        "구간을 찍을 때 쓰는 미리보기/썸네일. `t` 는 초 단위.\n\n"
+        "`preprocess=1` 이면 저장 때와 같은 전처리(주/야간 보정 + 선택적 리사이즈)를 적용해 "
+        "돌려준다. 보정 결과(day/night/off)는 `X-Daynight` 헤더로 준다. 나머지 쿼리"
+        "(`daynight`, `daynight_threshold`, `resize` …)로 설정을 덮어써 '보정 전/후'를 비교한다."
+    ),
 )
-async def video_frame(video_id: str, t: float = Query(0.0, ge=0.0, description="시각(초)")) -> Response:
-    frame = video_svc.grab_at(video_id, t)
-    return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg")
+async def video_frame(
+    video_id: str,
+    t: float = Query(0.0, ge=0.0, description="시각(초)"),
+    preprocess: bool = Query(False, description="전처리 적용 미리보기"),
+    daynight: Optional[str] = Query(None, description="auto | day | night | off"),
+    daynight_threshold: Optional[float] = Query(None, ge=0, le=255),
+    resize: Optional[bool] = Query(None),
+    resize_width: Optional[int] = Query(None, ge=32),
+    resize_height: Optional[int] = Query(None, ge=32),
+) -> Response:
+    if not preprocess:
+        frame = video_svc.grab_at(video_id, t)
+        return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg")
+    saved = video_svc.get_preprocess(video_id)
+    override = {k: v for k, v in {
+        "daynight": daynight, "daynight_threshold": daynight_threshold,
+        "resize": resize, "resize_width": resize_width, "resize_height": resize_height,
+    }.items() if v is not None}
+    frame, decided = video_svc.grab_at(video_id, t, preprocess={**saved, **override})
+    return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg",
+                    headers={"X-Daynight": decided})
+
+
+class PreprocessRequest(BaseModel):
+    daynight: Optional[str] = Field(None, description="auto | day | night | off")
+    daynight_threshold: Optional[float] = Field(None, ge=0, le=255)
+    night_clahe_clip: Optional[float] = Field(None, ge=0.1)
+    night_clahe_grid: Optional[int] = Field(None, ge=1)
+    night_gamma: Optional[float] = Field(None, ge=0.1)
+    resize: Optional[bool] = Field(None, description="해상도 다운스케일 여부")
+    resize_width: Optional[int] = Field(None, ge=32)
+    resize_height: Optional[int] = Field(None, ge=32)
+
+
+@router.get(
+    "/api/videos/{video_id}/preprocess",
+    tags=[_TAG_VIDEO],
+    summary="영상별 전처리 설정 조회",
+    description="저장된 영상별 전처리 설정과, 서버 기본값을 합쳐 실제로 적용될 값을 함께 준다.",
+)
+async def get_preprocess(video_id: str) -> JSONResponse:
+    from services import preprocess as pp_svc
+    saved = video_svc.get_preprocess(video_id)
+    return JSONResponse({
+        "video_id": video_id,
+        "saved": saved,
+        "effective": pp_svc.resolve(saved),
+        "daynight_modes": list(pp_svc.DAYNIGHT_MODES),
+    })
+
+
+@router.put(
+    "/api/videos/{video_id}/preprocess",
+    tags=[_TAG_VIDEO],
+    summary="영상별 전처리 설정 저장 (학습 전 지정)",
+    description=(
+        "자동 주/야간 판정이 틀리는 영상을 위해 **영상 단위로** day/night/off 를 고정하거나 "
+        "임계치·리사이즈 여부를 저장한다. 저장값은 추출 시 기본값으로 쓰이고, 추출 요청이 "
+        "값을 명시하면 요청이 우선한다."
+    ),
+)
+async def put_preprocess(video_id: str, req: PreprocessRequest) -> JSONResponse:
+    from services import preprocess as pp_svc
+    saved = video_svc.set_preprocess(video_id, req.model_dump(exclude_none=True))
+    return JSONResponse({"ok": True, "video_id": video_id, "saved": saved,
+                         "effective": pp_svc.resolve(saved)})
 
 
 def _ranged_file(path: Path, request: Request):
@@ -353,6 +430,16 @@ class ExtractRequest(BaseModel):
     max_frames: Optional[int] = Field(None, ge=1)
     track: Optional[bool] = Field(None, description="track_id 부여 (클래스 일괄 전파용)")
     overwrite: str = Field("skip", description="skip | auto | all")
+    # ── 전처리(생략 시 영상별 저장값 → 서버 기본값 순으로 채워진다) ──
+    daynight: Optional[str] = Field(None, description="auto | day | night | off (주/야간 보정)")
+    daynight_threshold: Optional[float] = Field(None, ge=0, le=255,
+                                                description="auto 판정 밝기 임계치(0~255)")
+    night_clahe_clip: Optional[float] = Field(None, ge=0.1)
+    night_clahe_grid: Optional[int] = Field(None, ge=1)
+    night_gamma: Optional[float] = Field(None, ge=0.1)
+    resize: Optional[bool] = Field(None, description="해상도 다운스케일 여부(선택)")
+    resize_width: Optional[int] = Field(None, ge=32)
+    resize_height: Optional[int] = Field(None, ge=32)
 
 
 @router.post(

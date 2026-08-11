@@ -116,8 +116,9 @@ def build_objects(raw_detections, width: int, height: int, *, source: str = "aut
 
 def new_doc(video_id: str, frame_index: int, *, time_sec: float, width: int, height: int,
             objects: List[dict], segment_kind: str = "normal",
-            model: Optional[str] = None) -> dict:
-    return {
+            model: Optional[str] = None, daynight: Optional[str] = None,
+            preprocess: Optional[dict] = None) -> dict:
+    doc = {
         "video_id": video_id,
         "frame_id": frame_id_for(frame_index),
         "frame_index": int(frame_index),
@@ -128,9 +129,14 @@ def new_doc(video_id: str, frame_index: int, *, time_sec: float, width: int, hei
         "status": "pending",
         "source": "auto",
         "model": model,
+        # 이 프레임을 무엇으로 전처리했는지 남긴다(day/night/off + 적용 설정).
+        # 학습 데이터가 어떻게 만들어졌는지 추적하고, 야간 비중을 집계하기 위함.
+        "daynight": daynight,
+        "preprocess": preprocess,
         "objects": objects,
         "updated_at": store.now_iso(),
     }
+    return doc
 
 
 def unresolved(doc: dict) -> List[str]:
@@ -267,6 +273,7 @@ def summarize(doc: dict) -> dict:
         "status": doc.get("status"),
         "source": doc.get("source"),
         "segment_kind": doc.get("segment_kind"),
+        "daynight": doc.get("daynight"),
         "n_objects": len(objs),
         "n_unresolved": len(unresolved(doc)),
         "class_names": sorted({o["class_name"] for o in objs if o.get("class_name")}),
