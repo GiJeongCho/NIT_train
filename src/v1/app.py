@@ -68,8 +68,8 @@ def create_app() -> FastAPI:
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
-        # 전처리 미리보기가 주/야간 판정 결과를 헤더로 읽는다(교차 출처라 노출 필요).
-        expose_headers=["X-Daynight"],
+        # 전처리 미리보기가 판정 결과를 헤더로 읽는다(교차 출처라 노출 필요).
+        expose_headers=["X-Daynight", "X-Dehaze", "X-Clahe"],
     )
 
     # 라우트를 얇게 유지하기 위해 서비스 계층이 올리는 표준 예외를 여기서 HTTP 로 번역한다.

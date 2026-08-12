@@ -117,6 +117,7 @@ def build_objects(raw_detections, width: int, height: int, *, source: str = "aut
 def new_doc(video_id: str, frame_index: int, *, time_sec: float, width: int, height: int,
             objects: List[dict], segment_kind: str = "normal",
             model: Optional[str] = None, daynight: Optional[str] = None,
+            dehaze: Optional[bool] = None, clahe: Optional[bool] = None,
             preprocess: Optional[dict] = None) -> dict:
     doc = {
         "video_id": video_id,
@@ -129,9 +130,11 @@ def new_doc(video_id: str, frame_index: int, *, time_sec: float, width: int, hei
         "status": "pending",
         "source": "auto",
         "model": model,
-        # 이 프레임을 무엇으로 전처리했는지 남긴다(day/night/off + 적용 설정).
-        # 학습 데이터가 어떻게 만들어졌는지 추적하고, 야간 비중을 집계하기 위함.
+        # 이 프레임을 무엇으로 전처리했는지 남긴다(야간 보정 day/night/off, 안개 제거 여부,
+        # 적용 설정). 학습 데이터가 어떻게 만들어졌는지 추적하고 비중을 집계하기 위함.
         "daynight": daynight,
+        "dehaze": dehaze,
+        "clahe": clahe,
         "preprocess": preprocess,
         "objects": objects,
         "updated_at": store.now_iso(),
@@ -274,6 +277,8 @@ def summarize(doc: dict) -> dict:
         "source": doc.get("source"),
         "segment_kind": doc.get("segment_kind"),
         "daynight": doc.get("daynight"),
+        "dehaze": doc.get("dehaze"),
+        "clahe": doc.get("clahe"),
         "n_objects": len(objs),
         "n_unresolved": len(unresolved(doc)),
         "class_names": sorted({o["class_name"] for o in objs if o.get("class_name")}),

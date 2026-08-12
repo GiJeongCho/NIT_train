@@ -301,45 +301,77 @@ detect로 가려면 `NIT_TRAIN_TASK=detect` 와 `NIT_TRAIN_BASE_MODEL` 을 함�
 
 ---
 
-## 8. 학습 전 전처리 (주/야간 · 해상도)
+## 8. 학습 전 전처리 (추론 tracker_py 와 동일 엔진)
 
-프레임을 **디스크에 저장하기 전에** 다듬는 단계다. 저장 이미지와 자동 라벨 추론 입력이
-같도록 `주/야간 보정 → (선택적) 다운스케일` 순으로 **한 번만** 적용한다. 구현은
-`services/preprocess.py`, 적용 지점은 `services/autolabel.py` 의 추출 루프다.
+프레임을 **디스크에 저장하기 전에** 다듬는 단계다. 핵심 원칙은 **학습 이미지 = 추론 입력**
+이다. 그래서 추론 서비스(tracker_py)가 추론 직전에 돌리는 전처리를 **그대로 떼어 온**
+`preprocess_vendor` 패키지(`src/v1/preprocess_vendor/`)를 사용한다. 자체 구현이 아니라 tracker_py
+의 실제 모듈(DCP 안개 제거, CLAHE, 다중지표 판정)을 복사한 것이라, 추론과 알고리즘·기본값이
+같다. 오케스트레이션은 `services/preprocess.py`, 적용 지점은 `services/autolabel.py` 의 추출 루프다.
+
+추론 `run_all` 과 동일한 순서로 **한 번만** 적용한다:
+`야간 보정(dark) → 안개 제거(fog) → CLAHE(quality) → (선택적) 다운스케일`.
+
+세 전처리는 **서로 독립 스위치**다(자유롭게 조합). `auto` 를 켜면 프레임마다 tracker_py 와
+동일한 **다중지표(밝기·대비·채도·선명도)** 로 저조도/안개를 판정해 해당 프레임에만, 끄면 켠
+전처리를 **모든 프레임**에 강제 적용한다. 모든 값의 우선순위는 **추출 요청 > 영상별 저장값
+('구간' 단계 지정) > 서버 기본값** 이다.
 
 적용된 설정과 프레임별 판정 결과는 라벨 문서에 남는다.
 
 ```json
-{ "daynight": "night", "preprocess": {"daynight": "auto", "threshold": 70.0, "resize": true, ...} }
+{ "daynight": "night", "dehaze": true, "clahe": true,
+  "preprocess": {"auto": true, "lowlight": true, "dehaze": true, "clahe": true,
+                 "dark_th": 60.0, "dehaze_omega": 0.8, "clahe_clip": 2.0, ...} }
 ```
 
-추출 잡 결과에는 집계가 담긴다: `"daynight_counts": {"day": 320, "night": 80, "off": 0}`.
+추출 잡 결과에는 집계와 사용된 야간 엔진이 담긴다:
+`"daynight_counts": {"day": 320, "night": 80, "off": 0}`, `"dehaze_frames": 400`,
+`"clahe_frames": 400`, `"lowlight_engine": "gamma_clahe"`.
 
-### 8.1 주/야간 보정
+### 8.1 야간 보정 (low-light / dark)
 
-야간(어두운) 프레임을 그대로 학습에 넣으면 저조도 구간에서 표적 특징이 뭉개진다.
-그래서 야간으로 판정된 프레임에만 저조도 보정을 건다 — **LAB 의 L(밝기) 채널에만 CLAHE**
-(국소 대비) + 감마(전역 밝기). 색 채널(a,b)은 건드리지 않아 색 왜곡이 없다. 밝은 주간
-프레임에 같은 보정을 걸면 하늘/노면이 과증폭돼 노이즈만 늘기 때문에 주간은 손대지 않는다.
+어두운 프레임을 그대로 학습에 넣으면 저조도 구간에서 표적 특징이 뭉개진다. `lowlight` 를
+켜고 `auto` 면 tracker_py 와 동일한 다중지표 판정으로 **저조도로 분류된 프레임에만** 보정을
+건다(밝기 임계 `dark_th` 기본 60). 자동 판정은 프레임 단위라 한 영상 안 낮→밤 전환도 따라간다.
 
-판정 우선순위는 **추출 요청 > 영상별 저장값 > 서버 기본값** 이다.
+보정 엔진은 두 가지다:
 
-| 모드 | 동작 |
-|---|---|
-| `auto` (기본) | 프레임 평균 밝기(Y, 0~255) < 임계치(기본 70) → 야간 |
-| `day` | 항상 주간 취급(보정 안 함) |
-| `night` | 항상 야간 취급(보정 함) |
-| `off` | 주/야간 보정 자체를 끔 |
+- **Zero-DCE++ (추론과 동일)** — `preprocess_vendor/zero_dce_weights/Epoch99.pth` 가 있거나
+  `NIT_TRAIN_ZERODCE_WEIGHTS` 로 가중치를 지정하면 이 CNN 을 쓴다. 추론 서비스의 저조도
+  보정과 완전히 동일해진다.
+- **감마 + CLAHE 폴백(기본)** — 가중치가 없을 때. 감마(전역 밝기) + LAB L 채널 CLAHE(국소
+  대비). 밝기가 부족하면 `night_gamma` 를 키운다(기본 1.6 → 2.0 등). 색 채널(a,b)은 건드리지
+  않아 색 왜곡이 없다.
 
-자동 판정은 프레임 단위라 한 영상 안에서 낮→밤 전환도 따라간다. 다만 낮인데 짙은 그늘,
-흑백/IR 렌즈처럼 자동이 틀리는 영상이 있다. 그런 영상은 **학습 전 '구간' 단계에서**
-`day`/`night`/`off` 로 고정한다(`PUT /api/videos/{id}/preprocess`). '구간' 화면의 미리보기로
-보정 전/후를 눈으로 비교할 수 있다(`GET /api/videos/{id}/frame?preprocess=1`).
+> tracker_py 의 Zero-DCE++ 가중치는 리포에 포함돼 있지 않다. 학습-추론을 저조도까지 완전히
+> 일치시키려면 가중치를 위 경로에 넣으면 자동으로 그 엔진으로 전환된다(현재 어떤 엔진이
+> 걸렸는지는 `GET /api/meta` 의 `defaults.preprocess.lowlight_engine` 로 확인).
 
-> 이 보정은 학습 이미지에 굽히므로, 실운영 추론(tracker_py)도 같은 야간 보정을 입력에
-> 적용해야 분포가 맞는다. 학습만 보정하고 추론은 원본을 쓰면 야간 성능이 어긋난다.
+자동이 틀리는 영상은 **학습 전 '구간' 단계에서** 끄거나 `auto=false`(강제)로 저장한다
+(`PUT /api/videos/{id}/preprocess`).
 
-### 8.2 해상도 다운스케일 (선택)
+### 8.2 안개 제거 (dehaze / fog)
+
+원거리 드론/CCTV 영상은 안개·연무·미세먼지로 대비가 죽는다. `dehaze` 를 켜면 tracker_py 와
+동일한 **Dark Channel Prior(DCP)** 로 대기산란(airlight)을 추정해 걷어낸다. 기본 파라미터도
+추론과 같다(`dehaze_omega=0.80`, `dehaze_t0=0.4`, `dehaze_wsz=15`, `dehaze_scale=0.25`,
+`dehaze_guide_r=20`). 추론 기본은 GPU DCP 지만 같은 알고리즘이라 CPU 로 돌려도 결과가 동일하다.
+
+### 8.3 화질 향상 (CLAHE / quality)
+
+추론 파이프라인의 Stage2(기본 ON)에 해당한다. LAB 의 L 채널에 CLAHE(clip 2.0, 8×8)를 걸어
+국소 대비를 살린다. 추론이 전 프레임에 적용하므로 학습도 기본 ON 이며, 저조도/안개와 달리
+자동 판정 없이 켜져 있으면 모든 프레임에 적용한다.
+
+'구간' 화면의 미리보기로 보정 전/후를 눈으로 비교할 수 있다
+(`GET /api/videos/{id}/frame?preprocess=1&auto=0&lowlight=1&dehaze=1&clahe=1`, 결과는
+`X-Daynight`/`X-Dehaze`/`X-Clahe` 헤더).
+
+> 이 보정은 학습 이미지에 굽히므로, 실운영 추론(tracker_py)도 같은 전처리를 입력에
+> 적용해야 분포가 맞는다. 그래서 tracker_py 의 전처리를 복사해 재사용한다.
+
+### 8.4 해상도 다운스케일 (선택)
 
 추출 프레임은 기본적으로 **640×480** 으로 정규화해 저장한다. 운영 추론(tracker_py)이
 입력을 640×480으로 정규화하기 때문이다. 학습 이미지가 다른 해상도면 객체의 픽셀 크기

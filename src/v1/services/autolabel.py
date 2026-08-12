@@ -82,8 +82,11 @@ def start(video_id: str, params: Optional[dict] = None) -> Job:
     # 요청에 들어온 전처리 키만 골라 영상별 저장값 위에 덮는다.
     saved = video_svc.get_preprocess(video_id)
     override = {k: params[k] for k in (
-        "daynight", "daynight_threshold", "night_clahe_clip", "night_clahe_grid",
-        "night_gamma", "resize", "resize_width", "resize_height",
+        "auto", "lowlight", "dehaze", "clahe", "lowlight_threshold",
+        "night_clahe_clip", "night_clahe_grid", "night_gamma",
+        "dehaze_omega", "dehaze_t0", "dehaze_wsz", "dehaze_scale", "dehaze_guide_r",
+        "clahe_clip", "clahe_grid",
+        "resize", "resize_width", "resize_height",
     ) if params.get(k) is not None}
     preprocess = pp.resolve({**saved, **override})
 
@@ -150,6 +153,8 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
     skipped = 0
     n_objects = 0
     daynight_counts = {"day": 0, "night": 0, "off": 0}
+    dehazed = 0
+    clahed = 0
     model_name = resolve_model_path(spec["model"]).name
     prep = spec.get("preprocess") or pp.resolve(None)
     quality = [int(cv2.IMWRITE_JPEG_QUALITY), get_settings().frame_jpeg_quality]
@@ -173,12 +178,16 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
                 job.advance(1)
                 continue
 
-            # 전처리: 주/야간 보정 → (선택적) 다운스케일. 저장 이미지와 추론 입력이
-            # 같도록 이 순서로 한 번만 적용한다(라벨과 이미지가 어긋나지 않게).
-            frame, decided = pp.apply_daynight(frame, prep)
+            # 전처리: 안개 제거 → 야간 보정 → (선택적) 다운스케일. 저장 이미지와 추론
+            # 입력이 같도록 이 순서로 한 번만 적용한다(라벨과 이미지가 어긋나지 않게).
+            frame, info = pp.apply(frame, prep)
             frame = video_svc.fit_frame(frame, prep["resize_width"], prep["resize_height"],
                                         resize=prep["resize"])
-            daynight_counts[decided] = daynight_counts.get(decided, 0) + 1
+            daynight_counts[info["lowlight"]] = daynight_counts.get(info["lowlight"], 0) + 1
+            if info["dehaze"]:
+                dehazed += 1
+            if info.get("clahe"):
+                clahed += 1
             h, w = frame.shape[:2]
 
             dets = detector.infer(
@@ -193,7 +202,8 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
                 time_sec=target_idx / fps if fps > 0 else 0.0,
                 width=w, height=h, objects=objects,
                 segment_kind=kind, model=model_name,
-                daynight=decided, preprocess=prep,
+                daynight=info["lowlight"], dehaze=info["dehaze"],
+                clahe=info.get("clahe", False), preprocess=prep,
             )
             annotations.save(video_id, frame_id, doc)
 
@@ -213,11 +223,15 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
         "model": model_name,
         "tracked": spec["track"],
         "preprocess": prep,
+        "lowlight_engine": pp.lowlight_engine(),
         "daynight_counts": daynight_counts,
+        "dehaze_frames": dehazed,
+        "clahe_frames": clahed,
         "progress": annotations.progress(video_id),
         "tracks": len(annotations.tracks(video_id)),
     }
-    job.message = (f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개 "
-                   f"(주간 {daynight_counts['day']} / 야간 {daynight_counts['night']}"
-                   + (f" / 보정끔 {daynight_counts['off']}" if daynight_counts['off'] else "")
-                   + ")")
+    _lowlight = "" if not prep.get("lowlight") else (
+        f", 야간보정 {daynight_counts['night']}장(주간 {daynight_counts['day']})")
+    _dehaze = f", 안개제거 {dehazed}장" if prep.get("dehaze") else ""
+    _clahe = f", CLAHE {clahed}장" if prep.get("clahe") else ""
+    job.message = f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개{_lowlight}{_dehaze}{_clahe}"

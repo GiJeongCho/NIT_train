@@ -47,12 +47,15 @@
   "dataset_tasks": ["obb", "detect"],
   "default_task": "obb",
   "split_modes": ["chunk", "random", "video"],
-  "daynight_modes": ["auto", "day", "night", "off"],
   "defaults": {
     "extract": {"fps": 2.0, "conf": 0.25, "iou": 0.7, "imgsz": 640, "track": true},
     "frame": {"resize": true, "width": 640, "height": 480},
-    "preprocess": {"daynight": "auto", "daynight_threshold": 70.0,
-                   "night_clahe_clip": 2.0, "night_clahe_grid": 8, "night_gamma": 1.15,
+    "preprocess": {"auto": true, "lowlight": true, "dehaze": false, "clahe": true,
+                   "lowlight_engine": "gamma_clahe", "lowlight_threshold": 60.0,
+                   "night_clahe_clip": 3.0, "night_clahe_grid": 8, "night_gamma": 1.6,
+                   "dehaze_omega": 0.80, "dehaze_t0": 0.4, "dehaze_wsz": 15,
+                   "dehaze_scale": 0.25, "dehaze_guide_r": 20,
+                   "clahe_clip": 2.0, "clahe_grid": 8,
                    "resize": true, "resize_width": 640, "resize_height": 480},
     "dataset": {"splits": {"train": 0.8, "valid": 0.15, "test": 0.05},
                 "split_mode": "chunk", "task": "obb"},
@@ -87,7 +90,7 @@ curl -X PUT http://localhost:8888/api/classes \
 | GET | `/api/videos/{video_id}/stream` | 재생 (HTTP Range 지원) |
 | GET | `/api/videos/{video_id}/frame?t=` | 특정 시각 프레임 JPEG (`preprocess=1` 로 전처리 미리보기) |
 | GET | `/api/videos/{video_id}/preprocess` | 영상별 전처리 설정 조회(+실제 적용값) |
-| PUT | `/api/videos/{video_id}/preprocess` | 영상별 전처리 설정 저장 (주/야간 고정 등) |
+| PUT | `/api/videos/{video_id}/preprocess` | 영상별 전처리 설정 저장 (안개 제거/야간 보정 등) |
 
 ```bash
 curl -F "file=@drone_01.mp4" http://localhost:8888/api/videos
@@ -106,17 +109,18 @@ curl -X POST http://localhost:8888/api/videos/path \
 `/stream` 은 Range 요청을 직접 처리한다. `<video src>` 로 붙이면 타임라인 탐색(seek)이
 되고, 이것이 구간 지정 UI의 전제 조건이다.
 
-### 전처리(주/야간) 설정
+### 전처리(추론 tracker_py 와 동일 엔진) 설정
 
-자동 주/야간 판정이 틀리는 영상은 **영상 단위로** 고정한다. 이 설정은 추출 시 기본값이
-되고, 추출 요청이 값을 명시하면 요청이 우선한다.
+야간 보정·안개 제거·CLAHE 는 **서로 독립** 스위치다(추론 서비스의 전처리를 그대로 재사용).
+`auto` 를 끄면 켠 전처리를 모든 프레임에 강제 적용한다. 자동/설정이 맞지 않는 영상은 **영상
+단위로** 조정해 저장한다. 이 설정은 추출 시 기본값이 되고, 추출 요청이 값을 명시하면 요청이 우선한다.
 
 ```bash
 curl -X PUT http://localhost:8888/api/videos/$VID/preprocess \
-  -H "Content-Type: application/json" -d '{"daynight":"night","resize":true}'
+  -H "Content-Type: application/json" -d '{"auto":true,"lowlight":true,"dehaze":true,"clahe":true}'
 
-# 보정 전/후 미리보기 (판정 결과는 X-Daynight 헤더)
-curl -D- "http://localhost:8888/api/videos/$VID/frame?t=12&preprocess=1&daynight=auto" -o after.jpg
+# 보정 전/후 미리보기 (판정 헤더: 야간 X-Daynight, 안개 X-Dehaze, CLAHE X-Clahe)
+curl -D- "http://localhost:8888/api/videos/$VID/frame?t=12&preprocess=1&auto=0&lowlight=1&dehaze=1&clahe=1" -o after.jpg
 ```
 
 `GET .../preprocess` 는 저장값(`saved`)과 서버 기본값을 합친 실제 적용값(`effective`)을
@@ -131,6 +135,7 @@ curl -D- "http://localhost:8888/api/videos/$VID/frame?t=12&preprocess=1&daynight
 | GET | `/api/videos/{video_id}/segments` | 구간 조회 |
 | PUT | `/api/videos/{video_id}/segments` | 정상/비정상 구간 저장 (전체 교체) |
 | GET | `/api/videos/{video_id}/selection` | 실제 추출 대상 구간 미리보기 |
+| GET | `/api/videos/{video_id}/detect_preview?t=` | 추출 전 모델 탐지 미리보기 (단일 프레임) |
 
 ```bash
 curl -X PUT http://localhost:8888/api/videos/$VID/segments \
@@ -154,6 +159,34 @@ curl -X PUT http://localhost:8888/api/videos/$VID/segments \
 - **정상 ∩ 비정상 = 비정상.** 사람이 "쓰지 말라"고 한 쪽이 항상 이긴다.
 - 정상 구간을 하나도 안 찍으면 **영상 전체를 정상**으로 본다(짧은 클립 편의).
 - 0.05초 미만 구간은 실수 클릭으로 보고 버린다.
+
+### 추출 전 모델 탐지 미리보기
+
+수천 장을 뽑기 전에, 현재 지점 프레임 **한 장**에 고른 가중치로 자동 라벨 결과를 미리 본다.
+추출과 **똑같은 전처리**를 적용한 뒤 탐지하므로 실제 초안이 어떻게 나올지 그대로 확인된다.
+가중치(`model`)와 임계값(`conf`/`iou`/`imgsz`)을 바꿔 가며 비교할 수 있다.
+
+```bash
+curl "http://localhost:8888/api/videos/$VID/detect_preview?t=12&conf=0.25&clahe=1"
+```
+
+```json
+{
+  "width": 640, "height": 480,
+  "model": "best.pt", "task": "obb",
+  "preprocess": {"lowlight": "day", "dehaze": false, "clahe": true},
+  "count": 2,
+  "detections": [
+    {"class_name": "Tiger_II_10.5_", "score": 0.83, "track_id": null,
+     "poly": [[x,y],[x,y],[x,y],[x,y]], "bbox": [x1,y1,x2,y2]}
+  ]
+}
+```
+
+- `poly` 는 **전처리 후 프레임 픽셀 좌표**(=`width`×`height` 기준)라, 프런트가 미리보기
+  이미지 위에 그대로 겹쳐 그린다.
+- `count` 가 0이면 이 가중치가 이 영상의 표적을 모른다는 뜻이다(라벨링 화면에서 직접
+  그리거나, 학습·승격한 모델로 다시 시도). 실제 초안 생성은 `POST .../extract` 가 한다.
 
 ---
 
@@ -192,13 +225,18 @@ curl -X POST http://localhost:8888/api/videos/$VID/extract \
 | `max_frames` | `20000` | 안전장치 |
 | `track` | `true` | `track_id` 부여 |
 | `overwrite` | `"skip"` | 재실행 정책 |
-| `daynight` | 영상별→서버값 | `auto`\|`day`\|`night`\|`off` (주/야간 보정). 요청이 최우선 |
-| `daynight_threshold` | `70` | `auto` 판정 밝기 임계치(0~255) |
+| `auto` | 서버값 | 프레임별 자동 판정. `false`=켠 전처리를 전 프레임 강제 적용 |
+| `lowlight` | 영상별→서버값 | 야간 보정(저조도). 요청이 최우선 |
+| `dehaze` | 영상별→서버값 | 안개 제거(DCP). 야간 보정과 **독립** |
+| `clahe` | 영상별→서버값 | 화질 향상 CLAHE(추론 Stage2) |
+| `lowlight_threshold` | `60` | auto 야간 판정 밝기 임계치(0~255) |
+| `night_gamma` | `1.6` | 야간 밝기 감마(**폴백 엔진에서만** 사용) |
 | `resize` | 서버값 | 해상도 다운스케일 여부. `resize_width`/`resize_height` 로 크기 지정 |
 
-전처리(주/야간 보정 + 다운스케일)는 프레임을 저장하기 전에 걸린다. 잡 결과에
-`daynight_counts`(주간/야간/보정끔 장수)와 적용된 `preprocess` 가 담긴다. 자세한 규칙은
-[`dataset_format.md`](dataset_format.md) §8.
+전처리(야간 보정 → 안개 제거 → CLAHE → 다운스케일)는 tracker_py 와 동일 엔진으로 프레임을
+저장하기 전에 걸린다. 잡 결과에
+`daynight_counts`(주간/야간/off 장수), `dehaze_frames`, `clahe_frames`, 사용된 야간 엔진
+`lowlight_engine`, 적용된 `preprocess` 가 담긴다. 자세한 규칙은 [`dataset_format.md`](dataset_format.md) §8.
 
 `conf` 기본값이 운영 추론보다 낮은 이유: 초안은 **사람이 지우는 게 추가하는 것보다 싸다.**
 빠뜨린 객체를 새로 그리는 비용이 오탐을 지우는 비용보다 훨씬 크다.

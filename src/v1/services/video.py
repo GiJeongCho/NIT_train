@@ -186,28 +186,21 @@ def get_preprocess(video_id: str) -> dict:
 def set_preprocess(video_id: str, cfg: Optional[dict]) -> dict:
     """영상별 전처리 설정을 저장한다(학습 전 '구간' 단계에서 지정).
 
-    자동 주/야간 판정이 틀리는 영상은 여기서 day/night/off 로 고정한다. 저장값은
+    안개 제거/야간 보정을 영상 단위로 켜고 끄거나 임계치·감마를 조정한다. 저장값은
     추출 시 기본값으로 쓰이되, 추출 요청이 값을 명시하면 요청이 우선한다.
     """
-    from services import preprocess as pp
-
     meta = get_meta(video_id)
     clean: dict = {}
     if cfg:
-        mode = cfg.get("daynight")
-        if mode is not None:
-            mode = str(mode).lower()
-            if mode not in pp.DAYNIGHT_MODES:
-                raise ValueError(f"daynight 은 {list(pp.DAYNIGHT_MODES)} 중 하나여야 합니다: {mode!r}")
-            clean["daynight"] = mode
-        for k in ("daynight_threshold", "night_clahe_clip", "night_gamma"):
+        for k in ("auto", "lowlight", "dehaze", "clahe", "resize"):
+            if cfg.get(k) is not None:
+                clean[k] = bool(cfg[k])
+        for k in ("lowlight_threshold", "night_clahe_clip", "night_gamma",
+                  "dehaze_omega", "dehaze_t0", "dehaze_scale", "clahe_clip"):
             if cfg.get(k) is not None:
                 clean[k] = float(cfg[k])
-        if cfg.get("night_clahe_grid") is not None:
-            clean["night_clahe_grid"] = int(cfg["night_clahe_grid"])
-        if cfg.get("resize") is not None:
-            clean["resize"] = bool(cfg["resize"])
-        for k in ("resize_width", "resize_height"):
+        for k in ("night_clahe_grid", "dehaze_wsz", "dehaze_guide_r", "clahe_grid",
+                  "resize_width", "resize_height"):
             if cfg.get(k) is not None:
                 clean[k] = int(cfg[k])
     meta["preprocess"] = clean
@@ -219,9 +212,9 @@ def grab_at(video_id: str, time_sec: float, *, fit: bool = True,
             preprocess: Optional[dict] = None):
     """특정 시각의 프레임 1장. 구간 지정 UI 의 미리보기/썸네일용.
 
-    `preprocess` 를 주면(dict) 전처리(주/야간 보정 + 선택적 리사이즈)를 적용해 돌려준다.
-    구간 화면에서 "보정 전/후" 를 눈으로 비교하기 위한 경로다. 이때 반환은
-    (프레임, 판정결과) 튜플이다.
+    `preprocess` 를 주면(dict) 전처리(안개 제거 + 야간 보정 + 선택적 리사이즈)를 적용해
+    돌려준다. 구간 화면에서 "보정 전/후" 를 눈으로 비교하기 위한 경로다. 이때 반환은
+    (프레임, 판정정보) 튜플이다(판정정보 = {"lowlight": ..., "dehaze": bool}).
     """
     path = source_path(video_id)
     cap = cv2.VideoCapture(str(path))
@@ -243,10 +236,10 @@ def grab_at(video_id: str, time_sec: float, *, fit: bool = True,
     if preprocess is not None:
         from services import preprocess as pp
         resolved = pp.resolve(preprocess)
-        frame, decided = pp.apply_daynight(frame, resolved)
+        frame, info = pp.apply(frame, resolved)
         frame = fit_frame(frame, resolved["resize_width"], resolved["resize_height"],
                           resize=resolved["resize"])
-        return frame, decided
+        return frame, info
     return fit_frame(frame) if fit else frame
 
 

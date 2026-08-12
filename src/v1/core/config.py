@@ -129,16 +129,32 @@ class Settings:
     frame_width: int = 640
     frame_height: int = 480
 
-    # ── 전처리(주/야간) ────────────────────────────────────────────────
-    # 저장 전에 프레임을 밝기로 주/야간 판정해, 야간이면 저조도 보정(CLAHE+감마)을 건다.
-    # 기본은 자동(auto). 자동 판정이 틀리는 영상은 '구간' 단계에서 day/night/off 로 고정한다.
-    preprocess_daynight: str = "auto"   # auto | day | night | off
-    # 평균 밝기(Y, 0~255)가 이 값보다 낮으면 야간. 드론 야간영상 기준의 보수적 기본값.
-    daynight_threshold: float = 70.0
-    # 야간 보정 파라미터. L 채널 CLAHE 국소 대비 + 감마 전역 밝기.
-    night_clahe_clip: float = 2.0
+    # ── 전처리 (추론 서비스 tracker_py 와 동일한 엔진/기본값) ─────────────
+    # 학습 이미지는 추론 입력과 똑같이 전처리돼야 분포가 맞으므로, tracker_py 의 전처리를
+    # 그대로 떼어 온 preprocess_vendor 엔진을 쓴다(services/preprocess.py).
+    #
+    # 세 전처리(야간 보정/안개 제거/CLAHE)를 서로 독립적으로 켠다. `auto` 를 켜면
+    # 프레임마다 tracker_py 와 동일한 다중지표(밝기·대비·채도·선명도)로 저조도/안개를
+    # 판정해 해당 프레임에만 적용한다. 끄면 켜 둔 전처리를 모든 프레임에 강제 적용한다.
+    preprocess_auto: bool = True        # 프레임별 자동 판정(끄면 강제 적용)
+    preprocess_lowlight: bool = True    # 야간 보정(저조도) 기본 ON (tracker_py dark_enabled=True)
+    preprocess_dehaze: bool = True      # 안개 제거(dehaze) 기본 ON (tracker_py fog_enabled=True)
+    preprocess_clahe: bool = True       # 화질 향상 CLAHE(추론 Stage2) 기본 ON
+    # auto 판정의 밝기 임계(0~255). tracker_py dark_th 기본값과 동일.
+    daynight_threshold: float = 60.0
+    # 야간 보정 '폴백'(Zero-DCE++ 가중치가 없을 때) 파라미터. 감마가 '밝기' 축이다.
+    night_clahe_clip: float = 3.0
     night_clahe_grid: int = 8
-    night_gamma: float = 1.15
+    night_gamma: float = 1.6
+    # 안개 제거(DCP) 파라미터 — tracker_py config_yolo.yaml 의 fog 기본값과 동일.
+    dehaze_omega: float = 0.80
+    dehaze_t0: float = 0.4
+    dehaze_wsz: int = 15
+    dehaze_scale: float = 0.25
+    dehaze_guide_r: int = 20
+    # 화질 향상 CLAHE(quality) 파라미터 — tracker_py 의 clahe_lab 기본값과 동일.
+    quality_clahe_clip: float = 2.0
+    quality_clahe_grid: int = 8
 
     # ── 데이터셋 ───────────────────────────────────────────────────────
     class_names: list = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
@@ -207,11 +223,21 @@ class Settings:
             frame_resize=_env_bool("NIT_TRAIN_FRAME_RESIZE", True),
             frame_width=_env_int("NIT_TRAIN_FRAME_WIDTH", 640),
             frame_height=_env_int("NIT_TRAIN_FRAME_HEIGHT", 480),
-            preprocess_daynight=_env_str("NIT_TRAIN_DAYNIGHT", "auto").lower(),
-            daynight_threshold=_env_float("NIT_TRAIN_DAYNIGHT_THRESHOLD", 70.0),
-            night_clahe_clip=_env_float("NIT_TRAIN_NIGHT_CLAHE_CLIP", 2.0),
+            preprocess_auto=_env_bool("NIT_TRAIN_PREPROCESS_AUTO", True),
+            preprocess_lowlight=_env_bool("NIT_TRAIN_LOWLIGHT", True),
+            preprocess_dehaze=_env_bool("NIT_TRAIN_DEHAZE", True),
+            preprocess_clahe=_env_bool("NIT_TRAIN_CLAHE", True),
+            daynight_threshold=_env_float("NIT_TRAIN_DAYNIGHT_THRESHOLD", 60.0),
+            night_clahe_clip=_env_float("NIT_TRAIN_NIGHT_CLAHE_CLIP", 3.0),
             night_clahe_grid=_env_int("NIT_TRAIN_NIGHT_CLAHE_GRID", 8),
-            night_gamma=_env_float("NIT_TRAIN_NIGHT_GAMMA", 1.15),
+            night_gamma=_env_float("NIT_TRAIN_NIGHT_GAMMA", 1.6),
+            dehaze_omega=_env_float("NIT_TRAIN_DEHAZE_OMEGA", 0.80),
+            dehaze_t0=_env_float("NIT_TRAIN_DEHAZE_T0", 0.4),
+            dehaze_wsz=_env_int("NIT_TRAIN_DEHAZE_WSZ", 15),
+            dehaze_scale=_env_float("NIT_TRAIN_DEHAZE_SCALE", 0.25),
+            dehaze_guide_r=_env_int("NIT_TRAIN_DEHAZE_GUIDE_R", 20),
+            quality_clahe_clip=_env_float("NIT_TRAIN_QUALITY_CLAHE_CLIP", 2.0),
+            quality_clahe_grid=_env_int("NIT_TRAIN_QUALITY_CLAHE_GRID", 8),
             class_names=_env_list("NIT_TRAIN_CLASS_NAMES", DEFAULT_CLASS_NAMES),
             dataset_task=_env_str("NIT_TRAIN_TASK", "obb").lower(),
             split_train=_env_float("NIT_TRAIN_SPLIT_TRAIN", 0.8),

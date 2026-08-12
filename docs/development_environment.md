@@ -175,19 +175,40 @@ docker compose up --build
 | `NIT_TRAIN_FRAME_WIDTH` / `_HEIGHT` | `640` / `480` | 정규화 해상도(추론 서비스와 동일) |
 | `NIT_TRAIN_FRAME_JPEG_QUALITY` | `92` | 저장 화질. 낮추면 디스크는 줄지만 작은 표적이 뭉갠다 |
 
-### 전처리(주/야간)
+### 전처리 (추론 tracker_py 와 동일 엔진)
 
-저장 전에 프레임을 밝기로 주/야간 판정해, 야간이면 저조도 보정(L 채널 CLAHE + 감마)을 건다.
-자동 판정이 틀리는 영상은 '구간' 화면에서 영상별로 `day`/`night`/`off` 로 고정한다
-(`PUT /api/videos/{id}/preprocess`). 추출 요청이 값을 명시하면 그것이 최우선이다.
+학습 이미지는 **추론 입력과 똑같이** 전처리돼야 분포가 맞으므로, 추론 서비스(tracker_py)의
+전처리를 그대로 떼어 온 `preprocess_vendor` 엔진을 쓴다(`src/v1/preprocess_vendor/`). 추론과
+같은 순서로 적용한다: **야간 보정(dark) → 안개 제거(fog) → CLAHE(quality)**.
+
+세 전처리는 **서로 독립** 스위치다. `NIT_TRAIN_PREPROCESS_AUTO=1`(자동)이면 프레임마다
+tracker_py 와 동일한 다중지표(밝기·대비·채도·선명도)로 저조도/안개를 판정해 해당 프레임에만
+적용하고, `0`(강제)이면 켠 전처리를 모든 프레임에 적용한다. 자동/설정이 맞지 않는 영상은
+'구간' 화면에서 영상별로 조정해 저장한다(`PUT /api/videos/{id}/preprocess`). 추출 요청이 값을
+명시하면 그것이 최우선이다.
+
+야간 보정(dark)은 **Zero-DCE++ 가중치가 있으면**(추론과 동일) 그것을, **없으면 감마+CLAHE
+폴백**을 쓴다. 완전 일치가 필요하면 `src/v1/preprocess_vendor/zero_dce_weights/Epoch99.pth` 를
+넣거나 `NIT_TRAIN_ZERODCE_WEIGHTS` 로 절대경로를 지정한다.
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `NIT_TRAIN_DAYNIGHT` | `auto` | `auto`(임계치) \| `day` \| `night` \| `off` |
-| `NIT_TRAIN_DAYNIGHT_THRESHOLD` | `70.0` | 평균 밝기(Y, 0~255)가 이 값보다 낮으면 야간 |
-| `NIT_TRAIN_NIGHT_CLAHE_CLIP` | `2.0` | 야간 보정 CLAHE 대비 한계(클수록 강함) |
-| `NIT_TRAIN_NIGHT_CLAHE_GRID` | `8` | CLAHE 타일 그리드(NxN) |
-| `NIT_TRAIN_NIGHT_GAMMA` | `1.15` | 야간 감마(>1 이면 어두운 영역을 밝게) |
+| `NIT_TRAIN_PREPROCESS_AUTO` | `1` | 프레임별 자동 판정(0=켠 전처리를 전 프레임 강제 적용) |
+| `NIT_TRAIN_LOWLIGHT` | `1` | 야간 보정(저조도) 적용 여부 (tracker_py `dark_enabled` 기본과 동일) |
+| `NIT_TRAIN_DEHAZE` | `1` | 안개 제거(dehaze, DCP) 적용 여부 (tracker_py `fog_enabled` 기본과 동일) |
+| `NIT_TRAIN_CLAHE` | `1` | 화질 향상 CLAHE(추론 Stage2) 적용 여부 |
+| `NIT_TRAIN_DAYNIGHT_THRESHOLD` | `60.0` | auto 판정 밝기 임계(tracker_py `dark_th` 와 동일) |
+| `NIT_TRAIN_ZERODCE_WEIGHTS` | (없음) | Zero-DCE++ 가중치 절대경로. 있으면 야간 보정을 추론과 동일하게 수행 |
+| `NIT_TRAIN_NIGHT_GAMMA` | `1.6` | 야간 밝기 감마(**폴백 엔진에서만** 사용, >1 이면 밝게) |
+| `NIT_TRAIN_NIGHT_CLAHE_CLIP` | `3.0` | 폴백 야간 CLAHE 국소 대비 한계 |
+| `NIT_TRAIN_NIGHT_CLAHE_GRID` | `8` | 폴백 야간 CLAHE 타일 그리드(NxN) |
+| `NIT_TRAIN_DEHAZE_OMEGA` | `0.80` | 안개 제거 강도(tracker_py fog 기본값과 동일) |
+| `NIT_TRAIN_DEHAZE_T0` | `0.4` | 투과율 하한(하늘 영역 과보정 방지) |
+| `NIT_TRAIN_DEHAZE_WSZ` | `15` | dark channel 패치 크기 |
+| `NIT_TRAIN_DEHAZE_SCALE` | `0.25` | 투과율 추정 다운스케일 비율 |
+| `NIT_TRAIN_DEHAZE_GUIDE_R` | `20` | guided filter 반경 |
+| `NIT_TRAIN_QUALITY_CLAHE_CLIP` | `2.0` | CLAHE(quality) 대비 한계(tracker_py 와 동일) |
+| `NIT_TRAIN_QUALITY_CLAHE_GRID` | `8` | CLAHE(quality) 타일 그리드(NxN) |
 
 ### 데이터셋
 

@@ -56,6 +56,12 @@ _TAG_JOB = "7. 작업 (Jobs)"
 _CHUNK = 1024 * 1024
 
 
+def _pp_lowlight_engine() -> str:
+    """현재 야간 보정 엔진 이름('zero_dce++' 가중치 있음 | 'gamma_clahe' 폴백)."""
+    from services import preprocess as pp_svc
+    return pp_svc.lowlight_engine()
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 0. 기타
 # ══════════════════════════════════════════════════════════════════════
@@ -87,18 +93,28 @@ async def meta() -> JSONResponse:
         "dataset_tasks": list(dataset_svc.TASKS),
         "default_task": s.dataset_task,
         "split_modes": list(dataset_svc.SPLIT_MODES),
-        "daynight_modes": ["auto", "day", "night", "off"],
         "defaults": {
             "extract": {"fps": s.extract_fps, "conf": s.autolabel_conf,
                         "iou": s.autolabel_iou, "imgsz": s.autolabel_imgsz,
                         "track": s.autolabel_track, "max_frames": s.extract_max_frames},
             "frame": {"resize": s.frame_resize, "width": s.frame_width,
                       "height": s.frame_height},
-            "preprocess": {"daynight": s.preprocess_daynight,
-                           "daynight_threshold": s.daynight_threshold,
+            "preprocess": {"auto": s.preprocess_auto,
+                           "lowlight": s.preprocess_lowlight,
+                           "dehaze": s.preprocess_dehaze,
+                           "clahe": s.preprocess_clahe,
+                           "lowlight_engine": _pp_lowlight_engine(),
+                           "lowlight_threshold": s.daynight_threshold,
                            "night_clahe_clip": s.night_clahe_clip,
                            "night_clahe_grid": s.night_clahe_grid,
                            "night_gamma": s.night_gamma,
+                           "dehaze_omega": s.dehaze_omega,
+                           "dehaze_t0": s.dehaze_t0,
+                           "dehaze_wsz": s.dehaze_wsz,
+                           "dehaze_scale": s.dehaze_scale,
+                           "dehaze_guide_r": s.dehaze_guide_r,
+                           "clahe_clip": s.quality_clahe_clip,
+                           "clahe_grid": s.quality_clahe_grid,
                            "resize": s.frame_resize,
                            "resize_width": s.frame_width,
                            "resize_height": s.frame_height},
@@ -242,17 +258,23 @@ async def stream_video(video_id: str, request: Request):
     summary="특정 시각 프레임(JPEG)",
     description=(
         "구간을 찍을 때 쓰는 미리보기/썸네일. `t` 는 초 단위.\n\n"
-        "`preprocess=1` 이면 저장 때와 같은 전처리(주/야간 보정 + 선택적 리사이즈)를 적용해 "
-        "돌려준다. 보정 결과(day/night/off)는 `X-Daynight` 헤더로 준다. 나머지 쿼리"
-        "(`daynight`, `daynight_threshold`, `resize` …)로 설정을 덮어써 '보정 전/후'를 비교한다."
+        "`preprocess=1` 이면 저장 때와 같은 전처리(추론 tracker_py 와 동일: 야간 보정 → "
+        "안개 제거 → CLAHE → 선택적 리사이즈)를 적용해 돌려준다. 판정 결과를 헤더로 준다: "
+        "야간 `X-Daynight`(day/night/off), 안개 제거 `X-Dehaze`(0/1), CLAHE `X-Clahe`(0/1). "
+        "쿼리(`auto`, `lowlight`, `dehaze`, `clahe`, `lowlight_threshold`, `night_gamma`, "
+        "`resize` …)로 설정을 덮어써 '보정 전/후'를 비교한다."
     ),
 )
 async def video_frame(
     video_id: str,
     t: float = Query(0.0, ge=0.0, description="시각(초)"),
     preprocess: bool = Query(False, description="전처리 적용 미리보기"),
-    daynight: Optional[str] = Query(None, description="auto | day | night | off"),
-    daynight_threshold: Optional[float] = Query(None, ge=0, le=255),
+    auto: Optional[bool] = Query(None, description="프레임별 자동 판정(끄면 강제 적용)"),
+    lowlight: Optional[bool] = Query(None, description="야간 보정"),
+    dehaze: Optional[bool] = Query(None, description="안개 제거"),
+    clahe: Optional[bool] = Query(None, description="화질 향상 CLAHE"),
+    lowlight_threshold: Optional[float] = Query(None, ge=0, le=255),
+    night_gamma: Optional[float] = Query(None, ge=0.1),
     resize: Optional[bool] = Query(None),
     resize_width: Optional[int] = Query(None, ge=32),
     resize_height: Optional[int] = Query(None, ge=32),
@@ -262,20 +284,34 @@ async def video_frame(
         return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg")
     saved = video_svc.get_preprocess(video_id)
     override = {k: v for k, v in {
-        "daynight": daynight, "daynight_threshold": daynight_threshold,
-        "resize": resize, "resize_width": resize_width, "resize_height": resize_height,
+        "auto": auto, "lowlight": lowlight, "dehaze": dehaze, "clahe": clahe,
+        "lowlight_threshold": lowlight_threshold,
+        "night_gamma": night_gamma, "resize": resize,
+        "resize_width": resize_width, "resize_height": resize_height,
     }.items() if v is not None}
-    frame, decided = video_svc.grab_at(video_id, t, preprocess={**saved, **override})
+    frame, info = video_svc.grab_at(video_id, t, preprocess={**saved, **override})
     return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg",
-                    headers={"X-Daynight": decided})
+                    headers={"X-Daynight": info["lowlight"],
+                             "X-Dehaze": "1" if info["dehaze"] else "0",
+                             "X-Clahe": "1" if info.get("clahe") else "0"})
 
 
 class PreprocessRequest(BaseModel):
-    daynight: Optional[str] = Field(None, description="auto | day | night | off")
-    daynight_threshold: Optional[float] = Field(None, ge=0, le=255)
+    auto: Optional[bool] = Field(None, description="프레임별 자동 판정(끄면 켠 전처리를 전 프레임 강제 적용)")
+    lowlight: Optional[bool] = Field(None, description="야간 보정(저조도 밝기↑)")
+    dehaze: Optional[bool] = Field(None, description="안개 제거(dehaze)")
+    clahe: Optional[bool] = Field(None, description="화질 향상 CLAHE(추론 Stage2)")
+    lowlight_threshold: Optional[float] = Field(None, ge=0, le=255)
     night_clahe_clip: Optional[float] = Field(None, ge=0.1)
     night_clahe_grid: Optional[int] = Field(None, ge=1)
-    night_gamma: Optional[float] = Field(None, ge=0.1)
+    night_gamma: Optional[float] = Field(None, ge=0.1, description="야간 밝기 감마(폴백 엔진에서만 사용, 클수록 밝음)")
+    dehaze_omega: Optional[float] = Field(None, ge=0, le=1)
+    dehaze_t0: Optional[float] = Field(None, ge=0, le=1)
+    dehaze_wsz: Optional[int] = Field(None, ge=3)
+    dehaze_scale: Optional[float] = Field(None, gt=0, le=1)
+    dehaze_guide_r: Optional[int] = Field(None, ge=1)
+    clahe_clip: Optional[float] = Field(None, ge=0.1)
+    clahe_grid: Optional[int] = Field(None, ge=1)
     resize: Optional[bool] = Field(None, description="해상도 다운스케일 여부")
     resize_width: Optional[int] = Field(None, ge=32)
     resize_height: Optional[int] = Field(None, ge=32)
@@ -294,7 +330,6 @@ async def get_preprocess(video_id: str) -> JSONResponse:
         "video_id": video_id,
         "saved": saved,
         "effective": pp_svc.resolve(saved),
-        "daynight_modes": list(pp_svc.DAYNIGHT_MODES),
     })
 
 
@@ -303,8 +338,8 @@ async def get_preprocess(video_id: str) -> JSONResponse:
     tags=[_TAG_VIDEO],
     summary="영상별 전처리 설정 저장 (학습 전 지정)",
     description=(
-        "자동 주/야간 판정이 틀리는 영상을 위해 **영상 단위로** day/night/off 를 고정하거나 "
-        "임계치·리사이즈 여부를 저장한다. 저장값은 추출 시 기본값으로 쓰이고, 추출 요청이 "
+        "안개 제거/야간 보정을 **영상 단위로** 켜고 끄거나 임계치·감마를 저장한다. 자동 야간 "
+        "판정이 틀리는 영상을 위한 경로다. 저장값은 추출 시 기본값으로 쓰이고, 추출 요청이 "
         "값을 명시하면 요청이 우선한다."
     ),
 )
@@ -416,6 +451,71 @@ async def get_selection(
     })
 
 
+@router.get(
+    "/api/videos/{video_id}/detect_preview",
+    tags=[_TAG_SEGMENT],
+    summary="추출 전 모델 탐지 미리보기 (단일 프레임)",
+    description=(
+        "본격 추출(수천 장) 전에, 현재 지점 프레임 **한 장**에 대해 고른 가중치로 자동 라벨 "
+        "결과를 미리 본다. 추출과 **똑같은 전처리**를 적용한 뒤 탐지하므로, 실제 초안이 어떻게 "
+        "나올지 그대로 확인할 수 있다.\n\n"
+        "- `model` 로 가중치를 고른다(생략 시 서버 기본값). `conf`/`iou`/`imgsz` 로 임계값 조정.\n"
+        "- 전처리 쿼리(`auto`,`lowlight`,`dehaze`,`clahe`,`lowlight_threshold`,`night_gamma`,"
+        "`resize` …)는 프레임 미리보기와 동일하게 덮어쓸 수 있다.\n"
+        "- 반환은 회전박스 꼭짓점(`poly`, 전처리 후 프레임 픽셀 좌표) 목록이라, 프런트가 "
+        "미리보기 이미지 위에 그대로 겹쳐 그릴 수 있다. 초안이 0개면 이 가중치가 이 영상의 "
+        "표적을 모른다는 뜻이다(라벨링 화면에서 직접 그리거나 승격 모델로 다시 시도)."
+    ),
+)
+async def detect_preview(
+    video_id: str,
+    t: float = Query(0.0, ge=0.0, description="시각(초)"),
+    model: Optional[str] = Query(None, description="자동 라벨 가중치(생략 시 서버 기본값)"),
+    conf: Optional[float] = Query(None, ge=0, le=1),
+    iou: Optional[float] = Query(None, ge=0, le=1),
+    imgsz: Optional[int] = Query(None, ge=32),
+    max_det: Optional[int] = Query(None, ge=1),
+    auto: Optional[bool] = Query(None),
+    lowlight: Optional[bool] = Query(None),
+    dehaze: Optional[bool] = Query(None),
+    clahe: Optional[bool] = Query(None),
+    lowlight_threshold: Optional[float] = Query(None, ge=0, le=255),
+    night_gamma: Optional[float] = Query(None, ge=0.1),
+    resize: Optional[bool] = Query(None),
+    resize_width: Optional[int] = Query(None, ge=32),
+    resize_height: Optional[int] = Query(None, ge=32),
+) -> JSONResponse:
+    saved = video_svc.get_preprocess(video_id)
+    override = {k: v for k, v in {
+        "auto": auto, "lowlight": lowlight, "dehaze": dehaze, "clahe": clahe,
+        "lowlight_threshold": lowlight_threshold, "night_gamma": night_gamma,
+        "resize": resize, "resize_width": resize_width, "resize_height": resize_height,
+    }.items() if v is not None}
+    frame, info = video_svc.grab_at(video_id, t, preprocess={**saved, **override})
+    det = detector_svc.get_detector(model)
+    objs = det.infer(frame, conf=conf, iou=iou, imgsz=imgsz, max_det=max_det, track=False)
+    h, w = frame.shape[:2]
+    di = det.info()
+    return JSONResponse({
+        "video_id": video_id,
+        "t": round(float(t), 3),
+        "width": int(w),
+        "height": int(h),
+        "model": di["name"],
+        "model_path": di["path"],
+        "task": det.task,
+        "preprocess": info,
+        "count": len(objs),
+        "detections": [{
+            "class_name": o["class_name"],
+            "score": o["score"],
+            "track_id": o.get("track_id"),
+            "poly": o["poly"],
+            "bbox": o["bbox"],
+        } for o in objs],
+    })
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 3. 라벨링
 # ══════════════════════════════════════════════════════════════════════
@@ -431,12 +531,22 @@ class ExtractRequest(BaseModel):
     track: Optional[bool] = Field(None, description="track_id 부여 (클래스 일괄 전파용)")
     overwrite: str = Field("skip", description="skip | auto | all")
     # ── 전처리(생략 시 영상별 저장값 → 서버 기본값 순으로 채워진다) ──
-    daynight: Optional[str] = Field(None, description="auto | day | night | off (주/야간 보정)")
-    daynight_threshold: Optional[float] = Field(None, ge=0, le=255,
-                                                description="auto 판정 밝기 임계치(0~255)")
+    auto: Optional[bool] = Field(None, description="프레임별 자동 판정(끄면 켠 전처리를 전 프레임 강제 적용)")
+    lowlight: Optional[bool] = Field(None, description="야간 보정(저조도 밝기↑). auto 면 어두운 프레임만 적용")
+    dehaze: Optional[bool] = Field(None, description="안개 제거(dehaze). auto 면 안개 프레임만 적용")
+    clahe: Optional[bool] = Field(None, description="화질 향상 CLAHE(추론 Stage2)")
+    lowlight_threshold: Optional[float] = Field(None, ge=0, le=255,
+                                                description="야간 자동 판정 밝기 임계치(0~255)")
     night_clahe_clip: Optional[float] = Field(None, ge=0.1)
     night_clahe_grid: Optional[int] = Field(None, ge=1)
-    night_gamma: Optional[float] = Field(None, ge=0.1)
+    night_gamma: Optional[float] = Field(None, ge=0.1, description="야간 밝기 감마(폴백 엔진에서만 사용)")
+    dehaze_omega: Optional[float] = Field(None, ge=0, le=1)
+    dehaze_t0: Optional[float] = Field(None, ge=0, le=1)
+    dehaze_wsz: Optional[int] = Field(None, ge=3)
+    dehaze_scale: Optional[float] = Field(None, gt=0, le=1)
+    dehaze_guide_r: Optional[int] = Field(None, ge=1)
+    clahe_clip: Optional[float] = Field(None, ge=0.1)
+    clahe_grid: Optional[int] = Field(None, ge=1)
     resize: Optional[bool] = Field(None, description="해상도 다운스케일 여부(선택)")
     resize_width: Optional[int] = Field(None, ge=32)
     resize_height: Optional[int] = Field(None, ge=32)
