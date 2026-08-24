@@ -17,6 +17,7 @@ DCP 를 자체 구현했는데, 그건 추론 파이프라인과 **다른 알고
       → [야간 보정(dark)]  auto 면 저조도로 판정된 프레임에만
       → [안개 제거(fog)]   auto 면 안개로 판정된 프레임에만
       → [화질 향상(CLAHE)] 켜져 있으면 전 프레임 (추론 Stage2 기본 ON)
+      → [표적 강조(emphasis)] 켜져 있으면 전 프레임 (추론 Stage3, 언샤프 마스크·기본 OFF)
       → (선택) 해상도 다운스케일 은 video.fit_frame 이 담당
 
 세 전처리는 **서로 독립**으로 켠다. `auto` 를 켜면 프레임마다 tracker_py 와 동일한
@@ -62,6 +63,20 @@ def _enhance_lowlight_fallback(frame, *, gamma: float, clahe_clip: float, clahe_
     clahe = cv2.createCLAHE(clipLimit=max(0.1, float(clahe_clip)), tileGridSize=(grid, grid))
     l = clahe.apply(l)
     return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+
+def _emphasis_unsharp(frame, *, sigma: float, alpha: float):
+    """Stage3 표적 강조 — 언샤프 마스크(tracker_py emphasis.unsharp_mask 이식).
+
+    out = frame·(1+α) − blur·α. 고주파(윤곽) 성분을 α 만큼 증폭해 원거리 소형 표적의
+    흐릿한 경계를 또렷하게 만든다. 좌표를 바꾸지 않는 광도 변환이라 라벨은 그대로 유효하다.
+    """
+    a = float(alpha)
+    if a <= 0:
+        return frame
+    blur = cv2.GaussianBlur(frame, (0, 0), max(0.1, float(sigma)))
+    out = cv2.addWeighted(frame, 1.0 + a, blur, -a, 0)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def _enhance_lowlight(frame, resolved: dict):
@@ -131,6 +146,10 @@ def resolve(cfg=None) -> dict:
         # 화질 향상(CLAHE, quality) 파라미터 — 추론 기본값과 동일
         "clahe_clip": _num("clahe_clip", s.quality_clahe_clip, float),
         "clahe_grid": _num("clahe_grid", s.quality_clahe_grid, int),
+        # 표적 강조(Stage3, emphasis) — 언샤프 마스크. 기본 OFF(옵트인).
+        "emphasis": _bool("emphasis", s.preprocess_emphasis),
+        "emphasis_sigma": _num("emphasis_sigma", s.emphasis_sigma, float),
+        "emphasis_alpha": _num("emphasis_alpha", s.emphasis_alpha, float),
         # 해상도 다운스케일(적용은 video.fit_frame)
         "resize": _bool("resize", s.frame_resize),
         "resize_width": _num("resize_width", s.frame_width, int),
@@ -144,7 +163,7 @@ def apply(frame, resolved: dict) -> Tuple[object, dict]:
     판정정보 = {"lowlight": "night"|"day"|"off", "dehaze": bool, "clahe": bool}.
     프레임마다 무엇을 적용했는지 라벨 문서에 남겨 집계/디버깅에 쓴다. 리사이즈는 하지 않는다.
     """
-    info = {"lowlight": "off", "dehaze": False, "clahe": False}
+    info = {"lowlight": "off", "dehaze": False, "clahe": False, "emphasis": False}
     out = frame
 
     want_low = bool(resolved.get("lowlight"))
@@ -187,5 +206,14 @@ def apply(frame, resolved: dict) -> Tuple[object, dict]:
             mode="lab_l",
         )
         info["clahe"] = True
+
+    # 4) 표적 강조(Stage3, emphasis) — 언샤프 마스크. 추론 체인과 동일하게 맨 마지막.
+    if resolved.get("emphasis"):
+        out = _emphasis_unsharp(
+            out,
+            sigma=float(resolved.get("emphasis_sigma", 1.0)),
+            alpha=float(resolved.get("emphasis_alpha", 0.5)),
+        )
+        info["emphasis"] = True
 
     return out, info

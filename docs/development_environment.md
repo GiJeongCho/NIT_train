@@ -198,8 +198,8 @@ tracker_py 와 동일한 다중지표(밝기·대비·채도·선명도)로 저�
 | `NIT_TRAIN_DEHAZE` | `1` | 안개 제거(dehaze, DCP) 적용 여부 (tracker_py `fog_enabled` 기본과 동일) |
 | `NIT_TRAIN_CLAHE` | `1` | 화질 향상 CLAHE(추론 Stage2) 적용 여부 |
 | `NIT_TRAIN_DAYNIGHT_THRESHOLD` | `60.0` | auto 판정 밝기 임계(tracker_py `dark_th` 와 동일) |
-| `NIT_TRAIN_ZERODCE_WEIGHTS` | (없음) | Zero-DCE++ 가중치 절대경로. 있으면 야간 보정을 추론과 동일하게 수행 |
-| `NIT_TRAIN_NIGHT_GAMMA` | `1.6` | 야간 밝기 감마(**폴백 엔진에서만** 사용, >1 이면 밝게) |
+| `NIT_TRAIN_ZERODCE_WEIGHTS` | 번들 `Epoch99.pth` | Zero-DCE++ 가중치 경로. 기본은 `preprocess_vendor/zero_dce_weights/Epoch99.pth`(리포 포함) → 야간 보정을 추론과 동일하게 수행. CPU 로도 동작 |
+| `NIT_TRAIN_NIGHT_GAMMA` | `1.6` | 야간 밝기 감마(**가중치 없을 때 폴백에서만** 사용, >1 이면 밝게) |
 | `NIT_TRAIN_NIGHT_CLAHE_CLIP` | `3.0` | 폴백 야간 CLAHE 국소 대비 한계 |
 | `NIT_TRAIN_NIGHT_CLAHE_GRID` | `8` | 폴백 야간 CLAHE 타일 그리드(NxN) |
 | `NIT_TRAIN_DEHAZE_OMEGA` | `0.80` | 안개 제거 강도(tracker_py fog 기본값과 동일) |

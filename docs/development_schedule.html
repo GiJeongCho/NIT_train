@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>development_schedule.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Markdown PDF CSS
+ */
+
+ body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> or <div class="page"></div> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+
+<script src="https://unpkg.com/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast')
+          ? 'dark'
+          : 'default'
+    });
+  </script>
+<h1 id="개발-일정-development-schedule">개발 일정 (Development Schedule)</h1>
+<blockquote>
+<p>대상: <code>NIT_train</code>(학습·라벨링 API) + <code>NIT_train_front</code>(웹 UI)
+기준: <strong>2인 개발</strong>, 약 <strong>8주(2개월)</strong>, 온프레미스/폐쇄망 전제
+작성일: 2026-08-18</p>
+</blockquote>
+<p>이 문서는 &quot;지금 우리가 만들고 있는 것&quot;을 <strong>처음부터 다시 만든다고 가정</strong>했을 때의
+표준 개발 일정이다. 실제로는 이미 상당 부분이 구현되어 있으므로(§7 현재 진척도),
+남은 작업 산정과 새 인력 온보딩·외부 보고용 기준선으로 쓴다.</p>
+<hr>
+<h2 id="1-전제와-산정-기준">1. 전제와 산정 기준</h2>
+<ul>
+<li><strong>인원</strong>: 2명 (나 / 민규님). 둘 다 Python·FastAPI·JS 가능, YOLO 사용 경험 있음.</li>
+<li><strong>가동</strong>: 주 5일, 1일 실효 6h(회의·리뷰·잡무 제외). 1주 = 2인 × 5일 = <strong>10 person-day(PD)</strong>.</li>
+<li><strong>환경</strong>: <code>NIT</code> conda 환경, GPU 1대(학습 검증용), 폐쇄망(외부 패키지 설치 제약).</li>
+<li><strong>규모 근거</strong>: 백엔드 ≈ 4,900줄(Python), 프론트 ≈ 4,000줄(JS/CSS/HTML), 문서 6종.</li>
+<li><strong>난이도 가중</strong>: 전처리 이식(Zero-DCE++/DCP), OBB 좌표계, 트래킹 전파, 학습 서브프로세스
+관리는 &quot;조용히 틀리기 쉬운&quot; 영역이라 테스트·버퍼를 더 얹었다.</li>
+</ul>
+<hr>
+<h2 id="2-역할-분담">2. 역할 분담</h2>
+<table>
+<thead>
+<tr>
+<th>구분</th>
+<th>담당</th>
+<th>주 책임 영역</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>개발 A</strong></td>
+<td>나</td>
+<td>백엔드·MLOps 파이프라인(코어/전처리/추론/자동라벨/데이터셋/학습/배포), API 계약</td>
+</tr>
+<tr>
+<td><strong>개발 B</strong></td>
+<td>민규님</td>
+<td>프론트엔드 SPA·라벨링 UX(구간 타임라인, OBB 라벨 에디터, 미리보기 시각화, 데이터셋/학습 화면)</td>
+</tr>
+<tr>
+<td><strong>공통</strong></td>
+<td>나 + 민규님</td>
+<td>초기 설계, API 스키마 합의, 통합 테스트, 스모크/문서, 도커화</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>경계 작업(미리보기, 구간 UI ↔ 추출 잡)은 <strong>API 계약을 먼저 확정</strong>하고 양쪽이 병렬로 진행한다.</p>
+</blockquote>
+<hr>
+<h2 id="3-작업-분해wbs와-공수">3. 작업 분해(WBS)와 공수</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>작업 패키지</th>
+<th>담당</th>
+<th style="text-align:right">공수(PD)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>설계·환경 셋업 (레이아웃, config/store, 잡 레지스트리, API 계약 초안)</td>
+<td>공통</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>1</td>
+<td>영상 등록·메타·스트리밍(Range)·썸네일</td>
+<td>A</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>2</td>
+<td>구간(정상/비정상) 저장·구간 연산(합집합/차집합)</td>
+<td>A</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>전처리 파이프라인 이식 (Zero-DCE++·DCP dehaze·CLAHE·주야 자동판정)</td>
+<td>A</td>
+<td style="text-align:right">6</td>
+</tr>
+<tr>
+<td>4</td>
+<td>추론·트래킹 (detector, OBB/detect 분기, poly/track_id)</td>
+<td>A</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>5</td>
+<td>프레임 추출 + 자동 라벨 초안 잡 (샘플링·전처리·트래킹)</td>
+<td>A</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>6</td>
+<td>라벨 CRUD·검수·클래스 전파·오버레이</td>
+<td>A</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>7</td>
+<td>데이터셋 빌드/임포트/병합·data.yaml·분할(chunk)</td>
+<td>A</td>
+<td style="text-align:right">6</td>
+</tr>
+<tr>
+<td>8</td>
+<td>학습 러너(자식 프로세스)·상태(state)·중단/재개</td>
+<td>A</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>9</td>
+<td>모델 레지스트리·승격·tracker_py 배포 연동</td>
+<td>A</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>10</td>
+<td>프론트 SPA 골격(라우팅/공통 UI/API 클라이언트)</td>
+<td>B</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>11</td>
+<td>영상·구간 화면(타임라인, 마우스 마킹, 재생 컨트롤)</td>
+<td>B</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>12</td>
+<td>라벨링 에디터(Canvas OBB 회전박스, 선택/전파, 단축키)</td>
+<td>B</td>
+<td style="text-align:right">8</td>
+</tr>
+<tr>
+<td>13</td>
+<td>데이터셋·학습·모델 화면</td>
+<td>B</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>14</td>
+<td>추출 전 미리보기(전처리+모델 탐지, 연속 트래킹)</td>
+<td>A+B</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td>15</td>
+<td>통합·스모크 테스트(<code>smoke_api</code>/<code>smoke_obb</code>)·버그픽스</td>
+<td>공통</td>
+<td style="text-align:right">5</td>
+</tr>
+<tr>
+<td>16</td>
+<td>문서 6종(architecture/api/dataset/labeling/env/standards)</td>
+<td>공통</td>
+<td style="text-align:right">3</td>
+</tr>
+<tr>
+<td>17</td>
+<td>도커화·배포 리허설·최종 버퍼</td>
+<td>공통</td>
+<td style="text-align:right">4</td>
+</tr>
+<tr>
+<td></td>
+<td><strong>합계</strong></td>
+<td></td>
+<td style="text-align:right"><strong>82 PD</strong></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>8주 × 10PD = 80PD 용량 대비 82PD → 초과분은 리스크 버퍼(§6)에서 흡수하거나
+라벨 에디터 고급 기능(#12) 일부를 2차로 미룬다.</p>
+</blockquote>
+<hr>
+<h2 id="4-주차별-계획-8주">4. 주차별 계획 (8주)</h2>
+<table>
+<thead>
+<tr>
+<th>주차</th>
+<th>개발 A (백엔드/MLOps)</th>
+<th>개발 B (프론트/UX)</th>
+<th>주말 마일스톤</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>W1</strong></td>
+<td>#0 설계·config/store·잡 레지스트리</td>
+<td>#0 API 계약 합의·SPA 골격(#10 착수)</td>
+<td><strong>M1</strong> 골격 기동, 계약 확정</td>
+</tr>
+<tr>
+<td><strong>W2</strong></td>
+<td>#1 영상 등록/스트리밍 · #2 구간</td>
+<td>#10 완료 · #11 영상·구간 화면</td>
+<td><strong>M2</strong> 영상 올리고 구간 지정 가능</td>
+</tr>
+<tr>
+<td><strong>W3</strong></td>
+<td>#3 전처리 이식(Zero-DCE++/DCP/CLAHE)</td>
+<td>#11 타임라인·마우스 마킹 마감</td>
+<td><strong>M3</strong> 전처리 결과 미리보기 확인</td>
+</tr>
+<tr>
+<td><strong>W4</strong></td>
+<td>#4 추론·트래킹 · #5 추출+자동라벨 잡</td>
+<td>#12 라벨 에디터(회전박스 그리기)</td>
+<td><strong>M4</strong> 영상→자동 라벨 초안 생성</td>
+</tr>
+<tr>
+<td><strong>W5</strong></td>
+<td>#6 라벨 검수·클래스 전파 API</td>
+<td>#12 선택/전파/단축키 마감</td>
+<td><strong>M5</strong> 사람 검수·전파 왕복 완성</td>
+</tr>
+<tr>
+<td><strong>W6</strong></td>
+<td>#7 데이터셋 빌드/임포트/병합</td>
+<td>#13 데이터셋·학습 화면</td>
+<td><strong>M6</strong> 승인 라벨→데이터셋 스냅샷</td>
+</tr>
+<tr>
+<td><strong>W7</strong></td>
+<td>#8 학습 러너 · #9 모델 승격/배포</td>
+<td>#14 미리보기(탐지/트래킹) 프론트</td>
+<td><strong>M7</strong> 1 epoch 학습→best.pt 승격</td>
+</tr>
+<tr>
+<td><strong>W8</strong></td>
+<td>#14 미리보기 백엔드 · #15 통합·버그</td>
+<td>#15 통합·UX 다듬기 · #16 문서</td>
+<td><strong>M8</strong> 스모크 통과·도커·릴리스</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="5-마일스톤-요약">5. 마일스톤 요약</h2>
+<table>
+<thead>
+<tr>
+<th>마일스톤</th>
+<th>시점</th>
+<th>&quot;됐다&quot;의 정의(수용 기준)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>M1</td>
+<td>W1말</td>
+<td>프론트↔API 통신, <code>/api/meta</code> 응답, 잡 레지스트리 동작</td>
+</tr>
+<tr>
+<td>M2</td>
+<td>W2말</td>
+<td>영상 업로드·스트리밍·정상/비정상 구간 저장/조회</td>
+</tr>
+<tr>
+<td>M3</td>
+<td>W3말</td>
+<td>주/야간 자동판정 + 저조도·안개·CLAHE 결과가 원본 대비 검증됨</td>
+</tr>
+<tr>
+<td>M4</td>
+<td>W4말</td>
+<td>구간→프레임 추출→트래킹 자동 라벨 초안 JSON 생성</td>
+</tr>
+<tr>
+<td>M5</td>
+<td>W5말</td>
+<td>라벨 검수·<code>track_id</code> 클래스 전파·프레임 승인 왕복</td>
+</tr>
+<tr>
+<td>M6</td>
+<td>W6말</td>
+<td>승인 라벨로 YOLO 데이터셋 + <code>data.yaml</code>, 기존 폴더 임포트/병합</td>
+</tr>
+<tr>
+<td>M7</td>
+<td>W7말</td>
+<td>자식 프로세스 학습 1 epoch 완주 → <code>best.pt</code> 승격</td>
+</tr>
+<tr>
+<td>M8</td>
+<td>W8말</td>
+<td><code>smoke_api</code>/<code>smoke_obb</code> 통과, 도커 볼륨 마운트로 상태 보존, 문서 완비</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="6-리스크와-버퍼">6. 리스크와 버퍼</h2>
+<table>
+<thead>
+<tr>
+<th>리스크</th>
+<th>영향</th>
+<th>대응</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>전처리 이식 결과가 추론과 미세하게 다름(밝기·색)</td>
+<td>라벨-추론 불일치</td>
+<td>tracker_py 가중치(<code>Epoch99.pth</code>) 번들·CPU 폴백, 헤더로 적용값 노출·비교</td>
+</tr>
+<tr>
+<td>OBB 좌표 변환/분할 버그(조용히 틀림)</td>
+<td>학습 mAP 왜곡</td>
+<td><code>smoke_obb</code>로 8좌표 컬럼·좌표 왕복 자동 검증</td>
+</tr>
+<tr>
+<td>사전학습 가중치가 도메인 표적을 못 잡음</td>
+<td>첫 자동 라벨 0개</td>
+<td>기존 데이터셋 부트스트랩 학습→승격 모델 재투입(설계 반영)</td>
+</tr>
+<tr>
+<td>GPU OOM/드라이버 크래시가 API 동반 사망</td>
+<td>서비스 중단</td>
+<td>학습을 서브프로세스로 격리, 상태는 <code>state.json</code> 파일</td>
+</tr>
+<tr>
+<td>폐쇄망 패키지 설치 제약</td>
+<td>일정 지연</td>
+<td>의존성 사전 고정(requirements)·오프라인 휠 준비</td>
+</tr>
+<tr>
+<td>2인 병목(리뷰 대기)</td>
+<td>처리량 저하</td>
+<td>API 계약 선확정 후 병렬화, 경계 작업 페어링</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>버퍼</strong>: 전체의 약 10%를 W8 후반에 흡수 버퍼로 확보(위 82PD의 초과분 포함).</li>
+</ul>
+<hr>
+<h2 id="7-현재-진척도-참고">7. 현재 진척도 (참고)</h2>
+<p>이미 §3의 대부분이 구현·검증되어 있다(스모크 테스트 통과 기준).</p>
+<ul>
+<li>완료: 코어/영상/구간/전처리 이식/추론·트래킹/자동라벨/검수·전파/데이터셋 빌드·임포트·병합/
+학습 러너/모델 승격/프론트 7개 화면/추출 전 <strong>탐지·트래킹 미리보기</strong>.</li>
+<li>잔여(권장 2차): 도커 이미지 최종화, 사용자 매뉴얼(운영자용), 라벨 에디터 고급 편의기능,
+대용량 영상 성능 튜닝.</li>
+</ul>
+<blockquote>
+<p>즉 현재는 위 8주 계획의 <strong>W7~W8 마무리 국면</strong>에 해당한다.</p>
+</blockquote>
+<hr>
+<h2 id="8-일정-간트-mermaid">8. 일정 간트 (Mermaid)</h2>
+<pre><code class="language-mermaid"><div class="mermaid">gantt
+    title NIT_train / NIT_train_front 개발 일정 (2인 · 8주)
+    dateFormat  YYYY-MM-DD
+    axisFormat  %m/%d
+
+    section 공통(설계·통합)
+    설계·환경·API계약(#0)      :done,    c0, 2026-08-24, 5d
+    통합·스모크·버그(#15)      :         c1, 2026-10-06, 5d
+    문서·도커·릴리스(#16,#17)  :         c2, 2026-10-13, 5d
+
+    section 개발 A (백엔드/MLOps)
+    영상·스트리밍(#1)          :a1, 2026-08-31, 4d
+    구간 연산(#2)              :a2, after a1, 1d
+    전처리 이식(#3)            :a3, 2026-09-07, 6d
+    추론·트래킹(#4)            :a4, 2026-09-14, 4d
+    추출+자동라벨(#5)          :a5, after a4, 1d
+    검수·전파(#6)              :a6, 2026-09-21, 4d
+    데이터셋 빌드/병합(#7)     :a7, 2026-09-28, 6d
+    학습 러너(#8)              :a8, 2026-10-05, 3d
+    모델 승격·배포(#9)         :a9, after a8, 2d
+
+    section 개발 B (프론트/UX)
+    SPA 골격(#10)              :b1, 2026-08-31, 4d
+    영상·구간 화면(#11)        :b2, 2026-09-07, 5d
+    라벨 에디터 OBB(#12)       :b3, 2026-09-14, 8d
+    데이터셋·학습 화면(#13)    :b4, 2026-09-28, 5d
+    미리보기 시각화(#14)       :b5, 2026-10-05, 4d
+</div></code></pre>
+
+</body>
+</html>

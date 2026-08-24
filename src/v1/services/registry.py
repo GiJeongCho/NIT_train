@@ -51,6 +51,21 @@ def list_models() -> dict:
     }
 
 
+def model_file(alias: str) -> Path:
+    """승격 모델(`workspace/models/<alias>.pt`) 파일 경로. 내보내기(다운로드)용.
+
+    학습 서버에 가져다 설치할 수 있도록 그대로 파일을 내려준다. alias 는 파일명이
+    되므로 경로 탈출(`../`)을 막기 위해 승격과 동일한 화이트리스트로 검증한다.
+    """
+    name = str(alias or "").strip()
+    if not _ALIAS_RE.match(name):
+        raise ValueError("alias 는 영문/숫자/.-_ 조합 1~48자여야 합니다")
+    path = store.models_root() / f"{name}.pt"
+    if not path.exists():
+        raise KeyError(f"승격된 모델이 없습니다: {name}")
+    return path
+
+
 def promote(run_id: str, *, alias: str, which: str = "best",
             note: str = "", deploy: bool = False) -> dict:
     """학습 결과를 배포 후보로 승격한다."""

@@ -114,6 +114,21 @@ class Settings:
     # 프런트에서 "이 객체의 클래스"를 한 번 고치면 전체 프레임에 전파할 수 있다.
     autolabel_track: bool = True
     autolabel_tracker: str = "botsort.yaml"
+    # 트래킹 엔진 선택. True(기본)면 추론 서비스(tracker_py)에서 이식한 커스텀 칼만
+    # 트래커(services/kalman_tracker.py)로 track_id 를 붙인다 — 운영 추론과 같은 규칙.
+    # False 면 ultralytics 내장 트래커(autolabel_tracker=botsort.yaml)로 폴백한다.
+    autolabel_custom_tracker: bool = True
+    # 커스텀 트래커가 track_id 를 '확정'해 내보내기까지 필요한 연속 탐지 프레임 수.
+    # 자동 라벨/미리보기는 초당 몇 장만 뽑는(저 fps) 샘플링이라, 기본 2 로 두면 확정 전에
+    # 창이 끝나 ID 가 안 붙어 보인다. 1 로 낮춰 두 번째 프레임부터 ID 가 보이게 한다.
+    autolabel_track_min_hits: int = 1
+    # 커스텀 트래커의 '고스트(예측) 트랙' 을 라벨로도 내보낼지. True 면 이번 프레임에 YOLO
+    # 탐지가 빠져도 칼만 예측 박스를 track_id 와 함께 그대로 내보낸다 → 깜빡임(보였다 안 보였다)
+    # 이 사라지고 트래킹이 연속돼 보인다. 예측 박스는 objects[].is_predicted=True 로 표시한다.
+    autolabel_emit_ghost: bool = True
+    # 고스트(예측만으로 유지)로 보여줄 최대 프레임 수. 트래커 기본값(100)은 30fps 연속 영상
+    # 기준이라 저 fps 샘플링(2fps)에서는 사라진 표적이 수십 초 남는다. 저 fps 에 맞춰 짧게 둔다.
+    autolabel_track_max_age: int = 3
     # startup 에서 기본 가중치를 미리 로드/워밍업할지. 끄면(기본) 첫 추출 작업에서
     # 로드한다. 학습만 쓰는 세션에서 수백 MB 가중치를 헛되게 올리지 않기 위함.
     preload_model: bool = False
@@ -155,6 +170,12 @@ class Settings:
     # 화질 향상 CLAHE(quality) 파라미터 — tracker_py 의 clahe_lab 기본값과 동일.
     quality_clahe_clip: float = 2.0
     quality_clahe_grid: int = 8
+    # 표적 강조(Stage3, tracker_py emphasis). 소형 표적의 고주파(윤곽)를 언샤프 마스크로 증폭.
+    # 주의: 이 전처리는 '전처리 정합 학습'(학습·추론 동일 체인)을 전제로 한다. 기존 가중치가
+    # 표적강조 없이 학습됐다면 켜는 순간 도메인 격차가 생겨 검출이 흔들릴 수 있으니 기본 OFF(옵트인).
+    preprocess_emphasis: bool = False   # 표적 강조(Stage3) 기본 OFF
+    emphasis_sigma: float = 1.0         # 언샤프 가우시안 시그마(클수록 넓은 윤곽 강조)
+    emphasis_alpha: float = 0.5         # 강조 세기(클수록 또렷/과하면 노이즈·링잉)
 
     # ── 데이터셋 ───────────────────────────────────────────────────────
     class_names: list = field(default_factory=lambda: list(DEFAULT_CLASS_NAMES))
@@ -216,6 +237,10 @@ class Settings:
             autolabel_max_det=_env_int("NIT_TRAIN_AUTOLABEL_MAX_DET", 300),
             autolabel_track=_env_bool("NIT_TRAIN_AUTOLABEL_TRACK", True),
             autolabel_tracker=_env_str("NIT_TRAIN_AUTOLABEL_TRACKER", "botsort.yaml"),
+            autolabel_custom_tracker=_env_bool("NIT_TRAIN_CUSTOM_TRACKER", True),
+            autolabel_track_min_hits=max(1, _env_int("NIT_TRAIN_TRACK_MIN_HITS", 1)),
+            autolabel_emit_ghost=_env_bool("NIT_TRAIN_EMIT_GHOST", True),
+            autolabel_track_max_age=max(1, _env_int("NIT_TRAIN_TRACK_MAX_AGE", 3)),
             preload_model=_env_bool("NIT_TRAIN_PRELOAD", False),
             extract_fps=_env_float("NIT_TRAIN_EXTRACT_FPS", 2.0),
             extract_max_frames=_env_int("NIT_TRAIN_EXTRACT_MAX_FRAMES", 20000),
@@ -238,6 +263,9 @@ class Settings:
             dehaze_guide_r=_env_int("NIT_TRAIN_DEHAZE_GUIDE_R", 20),
             quality_clahe_clip=_env_float("NIT_TRAIN_QUALITY_CLAHE_CLIP", 2.0),
             quality_clahe_grid=_env_int("NIT_TRAIN_QUALITY_CLAHE_GRID", 8),
+            preprocess_emphasis=_env_bool("NIT_TRAIN_EMPHASIS", False),
+            emphasis_sigma=_env_float("NIT_TRAIN_EMPHASIS_SIGMA", 1.0),
+            emphasis_alpha=_env_float("NIT_TRAIN_EMPHASIS_ALPHA", 0.5),
             class_names=_env_list("NIT_TRAIN_CLASS_NAMES", DEFAULT_CLASS_NAMES),
             dataset_task=_env_str("NIT_TRAIN_TASK", "obb").lower(),
             split_train=_env_float("NIT_TRAIN_SPLIT_TRAIN", 0.8),

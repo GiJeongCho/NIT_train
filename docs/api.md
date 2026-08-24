@@ -136,6 +136,7 @@ curl -D- "http://localhost:8888/api/videos/$VID/frame?t=12&preprocess=1&auto=0&l
 | PUT | `/api/videos/{video_id}/segments` | 정상/비정상 구간 저장 (전체 교체) |
 | GET | `/api/videos/{video_id}/selection` | 실제 추출 대상 구간 미리보기 |
 | GET | `/api/videos/{video_id}/detect_preview?t=` | 추출 전 모델 탐지 미리보기 (단일 프레임) |
+| GET | `/api/videos/{video_id}/track_preview?t=&n=` | 추출 전 연속 구간 트래킹 미리보기 (track_id) |
 
 ```bash
 curl -X PUT http://localhost:8888/api/videos/$VID/segments \
@@ -187,6 +188,40 @@ curl "http://localhost:8888/api/videos/$VID/detect_preview?t=12&conf=0.25&clahe=
   이미지 위에 그대로 겹쳐 그린다.
 - `count` 가 0이면 이 가중치가 이 영상의 표적을 모른다는 뜻이다(라벨링 화면에서 직접
   그리거나, 학습·승격한 모델로 다시 시도). 실제 초안 생성은 `POST .../extract` 가 한다.
+
+### 추출 전 연속 구간 트래킹 미리보기
+
+`detect_preview` 는 한 장이라 `track_id` 가 없다. 라벨링에서 **객체 단위(track_id)로 클래스를
+전파**하기 때문에, 넘어가기 전에 "트래킹 라벨이 어떻게 붙는지" 그대로 보고 싶을 때 쓴다.
+현재 지점 `t` 부터 **연속된 `n` 장**을 추출과 동일한 `fps` 로 뽑아 전처리 → 모델 →
+**트래킹**까지 한 번에(순서대로) 돌려준다. 같은 `track_id` = 같은 객체다.
+
+```bash
+curl "http://localhost:8888/api/videos/$VID/track_preview?t=12&n=8&fps=2&conf=0.25"
+```
+
+```json
+{
+  "start_t": 12.0, "fps": 2.0, "step": 0.5,
+  "width": 640, "height": 480, "model": "best.pt", "task": "obb",
+  "n_frames": 8, "n_tracks": 3,
+  "frames": [
+    {"t": 12.0, "count": 2, "preprocess": {"lowlight": "day", "dehaze": false, "clahe": true},
+     "detections": [
+       {"class_name": "Tiger_II_10.5_", "score": 0.83, "track_id": 0,
+        "poly": [[x,y],[x,y],[x,y],[x,y]], "bbox": [x1,y1,x2,y2]}
+     ]}
+  ]
+}
+```
+
+- 트래킹은 연속 프레임이라야 id 가 일관되므로 **서버가 한 요청에서 순서대로** 처리한다
+  (프레임마다 따로 부르면 id 가 안 이어진다).
+- **미리보기 전용 추론기**를 써서, 진행 중인 `extract` 잡의 트래킹 상태를 오염시키지 않는다.
+- `n_tracks` 는 이 창에서 잡힌 서로 다른 객체 수. 프런트는 `track_id` 별 색으로 그린다.
+- `reset`(기본 `true`)을 `false` 로 주면 트래커를 **초기화하지 않는다.** 구간 화면의
+  "전처리·트래킹 오버레이 재생"이 연속 창을 이어 붙일 때 이걸 써서 클립 전체에서 `track_id`
+  가 끊기지 않게 한다(추출과 동일한 단일 패스). 새 지점으로 이동하면 다시 `true` 로 시작한다.
 
 ---
 

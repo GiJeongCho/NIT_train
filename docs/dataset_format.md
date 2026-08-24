@@ -327,7 +327,7 @@ detect로 가려면 `NIT_TRAIN_TASK=detect` 와 `NIT_TRAIN_BASE_MODEL` 을 함�
 
 추출 잡 결과에는 집계와 사용된 야간 엔진이 담긴다:
 `"daynight_counts": {"day": 320, "night": 80, "off": 0}`, `"dehaze_frames": 400`,
-`"clahe_frames": 400`, `"lowlight_engine": "gamma_clahe"`.
+`"clahe_frames": 400`, `"lowlight_engine": "zero_dce++"`.
 
 ### 8.1 야간 보정 (low-light / dark)
 
@@ -337,16 +337,16 @@ detect로 가려면 `NIT_TRAIN_TASK=detect` 와 `NIT_TRAIN_BASE_MODEL` 을 함�
 
 보정 엔진은 두 가지다:
 
-- **Zero-DCE++ (추론과 동일)** — `preprocess_vendor/zero_dce_weights/Epoch99.pth` 가 있거나
-  `NIT_TRAIN_ZERODCE_WEIGHTS` 로 가중치를 지정하면 이 CNN 을 쓴다. 추론 서비스의 저조도
-  보정과 완전히 동일해진다.
-- **감마 + CLAHE 폴백(기본)** — 가중치가 없을 때. 감마(전역 밝기) + LAB L 채널 CLAHE(국소
-  대비). 밝기가 부족하면 `night_gamma` 를 키운다(기본 1.6 → 2.0 등). 색 채널(a,b)은 건드리지
-  않아 색 왜곡이 없다.
+- **Zero-DCE++ (추론과 동일, 기본)** — `preprocess_vendor/zero_dce_weights/Epoch99.pth`(약 52KB,
+  리포에 포함)를 로드해 추론 서비스와 **완전히 동일한** 저조도 보정을 한다. 초경량 CNN 이라
+  GPU 없이 **CPU 로도** 오프라인 프레임 추출에 충분하다(감마 파라미터는 무시됨).
+  `NIT_TRAIN_ZERODCE_WEIGHTS` 로 다른 가중치를 지정할 수도 있다.
+- **감마 + CLAHE 폴백** — 가중치가 없을 때만. 감마(전역 밝기) + LAB L 채널 CLAHE(국소 대비).
+  단, 아주 어두운 야간에서는 **과노출(하얗게 뜸)** 되기 쉬워 Zero-DCE++ 와 결과가 다르다.
+  가급적 위 가중치를 유지해 추론과 일치시킨다.
 
-> tracker_py 의 Zero-DCE++ 가중치는 리포에 포함돼 있지 않다. 학습-추론을 저조도까지 완전히
-> 일치시키려면 가중치를 위 경로에 넣으면 자동으로 그 엔진으로 전환된다(현재 어떤 엔진이
-> 걸렸는지는 `GET /api/meta` 의 `defaults.preprocess.lowlight_engine` 로 확인).
+> 현재 어떤 엔진이 걸렸는지는 `GET /api/meta` 의 `defaults.preprocess.lowlight_engine`
+> (`zero_dce++` | `gamma_clahe`)로 확인한다.
 
 자동이 틀리는 영상은 **학습 전 '구간' 단계에서** 끄거나 `auto=false`(강제)로 저장한다
 (`PUT /api/videos/{id}/preprocess`).

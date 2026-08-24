@@ -18,6 +18,7 @@ MLOps 파이프라인 순서대로 그룹이 나뉘어 있다.
 
 from __future__ import annotations
 
+import base64
 import os
 import tempfile
 from pathlib import Path
@@ -100,10 +101,11 @@ async def meta() -> JSONResponse:
             "frame": {"resize": s.frame_resize, "width": s.frame_width,
                       "height": s.frame_height},
             "preprocess": {"auto": s.preprocess_auto,
-                           "lowlight": s.preprocess_lowlight,
-                           "dehaze": s.preprocess_dehaze,
-                           "clahe": s.preprocess_clahe,
-                           "lowlight_engine": _pp_lowlight_engine(),
+                          "lowlight": s.preprocess_lowlight,
+                          "dehaze": s.preprocess_dehaze,
+                          "clahe": s.preprocess_clahe,
+                          "emphasis": s.preprocess_emphasis,
+                          "lowlight_engine": _pp_lowlight_engine(),
                            "lowlight_threshold": s.daynight_threshold,
                            "night_clahe_clip": s.night_clahe_clip,
                            "night_clahe_grid": s.night_clahe_grid,
@@ -273,6 +275,7 @@ async def video_frame(
     lowlight: Optional[bool] = Query(None, description="야간 보정"),
     dehaze: Optional[bool] = Query(None, description="안개 제거"),
     clahe: Optional[bool] = Query(None, description="화질 향상 CLAHE"),
+    emphasis: Optional[bool] = Query(None, description="표적 강조(Stage3, 언샤프 마스크)"),
     lowlight_threshold: Optional[float] = Query(None, ge=0, le=255),
     night_gamma: Optional[float] = Query(None, ge=0.1),
     resize: Optional[bool] = Query(None),
@@ -285,6 +288,7 @@ async def video_frame(
     saved = video_svc.get_preprocess(video_id)
     override = {k: v for k, v in {
         "auto": auto, "lowlight": lowlight, "dehaze": dehaze, "clahe": clahe,
+        "emphasis": emphasis,
         "lowlight_threshold": lowlight_threshold,
         "night_gamma": night_gamma, "resize": resize,
         "resize_width": resize_width, "resize_height": resize_height,
@@ -293,7 +297,8 @@ async def video_frame(
     return Response(content=video_svc.encode_jpeg(frame), media_type="image/jpeg",
                     headers={"X-Daynight": info["lowlight"],
                              "X-Dehaze": "1" if info["dehaze"] else "0",
-                             "X-Clahe": "1" if info.get("clahe") else "0"})
+                             "X-Clahe": "1" if info.get("clahe") else "0",
+                             "X-Emphasis": "1" if info.get("emphasis") else "0"})
 
 
 class PreprocessRequest(BaseModel):
@@ -301,6 +306,9 @@ class PreprocessRequest(BaseModel):
     lowlight: Optional[bool] = Field(None, description="야간 보정(저조도 밝기↑)")
     dehaze: Optional[bool] = Field(None, description="안개 제거(dehaze)")
     clahe: Optional[bool] = Field(None, description="화질 향상 CLAHE(추론 Stage2)")
+    emphasis: Optional[bool] = Field(None, description="표적 강조(Stage3, 언샤프 마스크·기본 OFF)")
+    emphasis_sigma: Optional[float] = Field(None, gt=0)
+    emphasis_alpha: Optional[float] = Field(None, ge=0)
     lowlight_threshold: Optional[float] = Field(None, ge=0, le=255)
     night_clahe_clip: Optional[float] = Field(None, ge=0.1)
     night_clahe_grid: Optional[int] = Field(None, ge=1)
@@ -479,6 +487,7 @@ async def detect_preview(
     lowlight: Optional[bool] = Query(None),
     dehaze: Optional[bool] = Query(None),
     clahe: Optional[bool] = Query(None),
+    emphasis: Optional[bool] = Query(None, description="표적 강조(Stage3)"),
     lowlight_threshold: Optional[float] = Query(None, ge=0, le=255),
     night_gamma: Optional[float] = Query(None, ge=0.1),
     resize: Optional[bool] = Query(None),
@@ -488,6 +497,7 @@ async def detect_preview(
     saved = video_svc.get_preprocess(video_id)
     override = {k: v for k, v in {
         "auto": auto, "lowlight": lowlight, "dehaze": dehaze, "clahe": clahe,
+        "emphasis": emphasis,
         "lowlight_threshold": lowlight_threshold, "night_gamma": night_gamma,
         "resize": resize, "resize_width": resize_width, "resize_height": resize_height,
     }.items() if v is not None}
@@ -516,6 +526,110 @@ async def detect_preview(
     })
 
 
+@router.get(
+    "/api/videos/{video_id}/track_preview",
+    tags=[_TAG_SEGMENT],
+    summary="추출 전 연속 구간 트래킹 미리보기",
+    description=(
+        "현재 지점부터 **연속된 여러 프레임**을 추출과 동일한 fps 로 뽑아, 전처리 → 모델 → "
+        "**트래킹(track_id) 라벨**까지 붙인 결과를 순서대로 돌려준다. 라벨링 화면에 넘어가기 전에 "
+        "'객체 단위 라벨(track_id)' 이 어떻게 붙을지 그대로 확인하는 용도다.\n\n"
+        "- 트래킹은 연속 프레임이라야 id 가 일관되므로 **서버가 한 번에 순서대로** 처리한다.\n"
+        "- 같은 `track_id` 는 같은 객체다(프런트가 id 별 색으로 그려 흐름을 보여준다).\n"
+        "- 미리보기 전용 추론기를 써서 진행 중인 추출 잡의 트래킹 상태를 건드리지 않는다.\n"
+        "- `fps` 생략 시 추출 기본 fps 를 쓴다. 전처리 쿼리는 프레임 미리보기와 동일하게 덮어쓴다."
+    ),
+)
+async def track_preview(
+    video_id: str,
+    t: float = Query(0.0, ge=0.0, description="시작 시각(초)"),
+    n: int = Query(8, ge=1, le=40, description="연속 프레임 수"),
+    fps: Optional[float] = Query(None, gt=0, description="샘플 fps(생략 시 추출 기본값)"),
+    reset: bool = Query(True, description="트래커 초기화 여부. 오버레이 재생에서 창을 이어 붙일 때 False 로 두면 track_id 가 연속된다"),
+    image: bool = Query(False, description="각 프레임의 전처리 후 JPEG 를 data URI 로 함께 반환(프런트가 이미지를 다시 요청·전처리하지 않아도 되어 빨라진다)"),
+    model: Optional[str] = Query(None),
+    conf: Optional[float] = Query(None, ge=0, le=1),
+    iou: Optional[float] = Query(None, ge=0, le=1),
+    imgsz: Optional[int] = Query(None, ge=32),
+    max_det: Optional[int] = Query(None, ge=1),
+    auto: Optional[bool] = Query(None),
+    lowlight: Optional[bool] = Query(None),
+    dehaze: Optional[bool] = Query(None),
+    clahe: Optional[bool] = Query(None),
+    emphasis: Optional[bool] = Query(None, description="표적 강조(Stage3)"),
+    lowlight_threshold: Optional[float] = Query(None, ge=0, le=255),
+    night_gamma: Optional[float] = Query(None, ge=0.1),
+    resize: Optional[bool] = Query(None),
+    resize_width: Optional[int] = Query(None, ge=32),
+    resize_height: Optional[int] = Query(None, ge=32),
+) -> JSONResponse:
+    s = get_settings()
+    sample_fps = float(fps) if fps else float(s.extract_fps)
+    step = 1.0 / sample_fps if sample_fps > 0 else 0.5
+    duration = float(video_svc.get_meta(video_id).get("duration_sec") or 0.0)
+
+    saved = video_svc.get_preprocess(video_id)
+    override = {k: v for k, v in {
+        "auto": auto, "lowlight": lowlight, "dehaze": dehaze, "clahe": clahe,
+        "emphasis": emphasis,
+        "lowlight_threshold": lowlight_threshold, "night_gamma": night_gamma,
+        "resize": resize, "resize_width": resize_width, "resize_height": resize_height,
+    }.items() if v is not None}
+    merged = {**saved, **override}
+
+    det = detector_svc.get_preview_detector(model)
+    if reset:
+        # 새 지점에서 시작할 때만 초기화. 오버레이 재생이 다음 창을 이어 받을 때는
+        # reset=False 로 호출해 track_id 가 클립 전체에서 연속되게 한다(추출과 동일한 단일 패스).
+        det.reset_tracker()
+
+    frames: list = []
+    width = height = 0
+    for k in range(int(n)):
+        tk = float(t) + k * step
+        if duration and tk > duration:
+            break
+        frame, info = video_svc.grab_at(video_id, tk, preprocess=merged)
+        objs = det.infer(frame, conf=conf, iou=iou, imgsz=imgsz, max_det=max_det, track=True)
+        height, width = frame.shape[:2]
+        item = {
+            "t": round(tk, 3),
+            "count": len(objs),
+            "preprocess": info,
+            "detections": [{
+                "class_name": o["class_name"],
+                "score": o["score"],
+                "track_id": o.get("track_id"),
+                "poly": o["poly"],
+                "bbox": o["bbox"],
+                "is_predicted": bool(o.get("is_predicted", False)),
+                "track_status": o.get("track_status"),
+            } for o in objs],
+        }
+        if image:
+            # 탐지에 쓴 바로 그 전처리 프레임을 실어 보낸다(프런트가 재요청·재전처리하지 않음).
+            b64 = base64.b64encode(video_svc.encode_jpeg(frame)).decode("ascii")
+            item["image"] = f"data:image/jpeg;base64,{b64}"
+        frames.append(item)
+
+    di = det.info()
+    n_tracks = len({d["track_id"] for f in frames for d in f["detections"]
+                    if d.get("track_id") is not None})
+    return JSONResponse({
+        "video_id": video_id,
+        "start_t": round(float(t), 3),
+        "fps": sample_fps,
+        "step": round(step, 4),
+        "width": int(width),
+        "height": int(height),
+        "model": di["name"],
+        "task": det.task,
+        "n_frames": len(frames),
+        "n_tracks": n_tracks,
+        "frames": frames,
+    })
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 3. 라벨링
 # ══════════════════════════════════════════════════════════════════════
@@ -535,6 +649,9 @@ class ExtractRequest(BaseModel):
     lowlight: Optional[bool] = Field(None, description="야간 보정(저조도 밝기↑). auto 면 어두운 프레임만 적용")
     dehaze: Optional[bool] = Field(None, description="안개 제거(dehaze). auto 면 안개 프레임만 적용")
     clahe: Optional[bool] = Field(None, description="화질 향상 CLAHE(추론 Stage2)")
+    emphasis: Optional[bool] = Field(None, description="표적 강조(Stage3, 언샤프 마스크·기본 OFF)")
+    emphasis_sigma: Optional[float] = Field(None, gt=0)
+    emphasis_alpha: Optional[float] = Field(None, ge=0)
     lowlight_threshold: Optional[float] = Field(None, ge=0, le=255,
                                                 description="야간 자동 판정 밝기 임계치(0~255)")
     night_clahe_clip: Optional[float] = Field(None, ge=0.1)
@@ -576,16 +693,21 @@ async def extract_frames(video_id: str, req: ExtractRequest) -> JSONResponse:
     "/api/videos/{video_id}/frames",
     tags=[_TAG_LABEL],
     summary="프레임 목록 (라벨 요약)",
-    description="폴리곤 좌표를 뺀 경량 요약. 검수 화면의 썸네일 그리드용.",
+    description=(
+        "폴리곤 좌표를 뺀 경량 요약. 검수 화면의 썸네일 그리드용.\n"
+        "`detail=1` 이면 객체 도형(poly/bbox/track_id/class)까지 실어 준다 — "
+        "저장된 프레임을 그대로 **재생**할 때 프레임마다 라벨을 다시 요청하지 않게."
+    ),
 )
 async def list_frames(
     video_id: str,
     status: Optional[str] = Query(None, description="pending | approved | rejected"),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    detail: bool = Query(False, description="객체 도형까지 포함(재생용)"),
 ) -> JSONResponse:
     return JSONResponse(annotations.list_frames(video_id, status=status,
-                                                offset=offset, limit=limit))
+                                                offset=offset, limit=limit, detail=detail))
 
 
 @router.get("/api/videos/{video_id}/progress", tags=[_TAG_LABEL], summary="라벨링 진행률")
@@ -983,6 +1105,21 @@ class PromoteRequest(BaseModel):
 async def promote_model(req: PromoteRequest) -> JSONResponse:
     return JSONResponse({"ok": True, **registry.promote(
         req.run_id, alias=req.alias, which=req.which, note=req.note, deploy=req.deploy)})
+
+
+@router.get(
+    "/api/models/{alias}/download",
+    tags=[_TAG_MODEL],
+    summary="승격 모델 내보내기(.pt 다운로드)",
+    description=(
+        "승격된 모델 가중치 파일(`workspace/models/<alias>.pt`)을 그대로 내려준다. "
+        "여기서 추론하지 않고, 이 파일을 학습/추론 서버에 가져다 설치하는 용도다."
+    ),
+)
+async def download_model(alias: str) -> FileResponse:
+    path = registry.model_file(alias)
+    return FileResponse(path, media_type="application/octet-stream",
+                        filename=f"{alias}.pt")
 
 
 @router.delete("/api/models/{alias}", tags=[_TAG_MODEL], summary="승격 취소(파일+이력 삭제)")

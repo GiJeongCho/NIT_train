@@ -108,6 +108,10 @@ def build_objects(raw_detections, width: int, height: int, *, source: str = "aut
             "poly": [[round(float(x), 2), round(float(y), 2)] for x, y in poly],
             "bbox": [round(v, 2) for v in poly_to_xyxy(poly)],
             "track_id": det.get("track_id"),
+            # 커스텀 트래커의 고스트(예측) 박스 여부와 상태(stable/ghost/revived/locked…).
+            # 예측 박스는 실제 탐지가 아니므로 프런트에서 점선으로 구분해 그린다.
+            "is_predicted": bool(det.get("is_predicted", False)),
+            "track_status": det.get("track_status"),
             "source": str(det.get("source") or source),
             "verified": bool(det.get("verified", False)),
         })
@@ -286,9 +290,39 @@ def summarize(doc: dict) -> dict:
     }
 
 
+def detail_view(doc: dict) -> dict:
+    """재생·검수용. 요약 + 객체 도형(poly/bbox/track_id/class)까지 포함한다.
+
+    저장된 프레임을 그대로 재생할 때, 프런트가 프레임마다 라벨을 따로 요청하지 않도록
+    한 번에 도형까지 실어 보낸다(느린 track_preview 재계산 대신 저장본을 쓰기 위함).
+    """
+    base = summarize(doc)
+    base["width"] = doc.get("width")
+    base["height"] = doc.get("height")
+    base["model"] = doc.get("model")
+    base["objects"] = [
+        {
+            "id": o.get("id"),
+            "class_name": o.get("class_name"),
+            "class_id": o.get("class_id"),
+            "model_class_name": o.get("model_class_name"),
+            "score": o.get("score"),
+            "poly": o.get("poly"),
+            "bbox": o.get("bbox"),
+            "track_id": o.get("track_id"),
+            "is_predicted": bool(o.get("is_predicted", False)),
+            "track_status": o.get("track_status"),
+            "verified": o.get("verified"),
+        }
+        for o in (doc.get("objects") or [])
+    ]
+    return base
+
+
 def list_frames(video_id: str, *, status: Optional[str] = None, offset: int = 0,
-                limit: int = 100) -> dict:
+                limit: int = 100, detail: bool = False) -> dict:
     fids = store.list_frame_ids(video_id)
+    project = detail_view if detail else summarize
     items: List[dict] = []
     for fid in fids:
         doc = store.read_json(label_path(video_id, fid), None)
@@ -296,7 +330,7 @@ def list_frames(video_id: str, *, status: Optional[str] = None, offset: int = 0,
             continue
         if status and doc.get("status") != status:
             continue
-        items.append(summarize(doc))
+        items.append(project(doc))
     total = len(items)
     start = max(0, int(offset))
     end = start + max(1, int(limit))

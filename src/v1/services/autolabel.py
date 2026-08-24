@@ -82,10 +82,10 @@ def start(video_id: str, params: Optional[dict] = None) -> Job:
     # 요청에 들어온 전처리 키만 골라 영상별 저장값 위에 덮는다.
     saved = video_svc.get_preprocess(video_id)
     override = {k: params[k] for k in (
-        "auto", "lowlight", "dehaze", "clahe", "lowlight_threshold",
+        "auto", "lowlight", "dehaze", "clahe", "emphasis", "lowlight_threshold",
         "night_clahe_clip", "night_clahe_grid", "night_gamma",
         "dehaze_omega", "dehaze_t0", "dehaze_wsz", "dehaze_scale", "dehaze_guide_r",
-        "clahe_clip", "clahe_grid",
+        "clahe_clip", "clahe_grid", "emphasis_sigma", "emphasis_alpha",
         "resize", "resize_width", "resize_height",
     ) if params.get(k) is not None}
     preprocess = pp.resolve({**saved, **override})
