@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from core.config import get_settings
+from core.config import PROJECT_ROOT, get_settings
 from core import store
 from services import detector as detector_svc, trainer as trainer_svc
 
@@ -135,3 +135,65 @@ def unpromote(alias: str) -> dict:
     (store.models_root() / f"{alias}.pt").unlink(missing_ok=True)
     _save(doc)
     return {"alias": alias, "removed": before - len(doc["models"])}
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """`path` 가 `root` 아래(또는 같음)인지. 경로 탈출(../)로 임의 파일 삭제를 막는다."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def delete_weight(target: str) -> dict:
+    """'사용 가능한 가중치' 목록의 파일 하나를 실제로 지운다.
+
+    프런트가 `path`(워크스페이스 상대) 또는 절대경로를 그대로 넘겨도 되도록 여러 기준으로
+    해석한다. 안전을 위해 **허용 폴더 안**의 파일만 지운다.
+
+    허용 위치
+    - `test_model/`          : 사전학습 가중치
+    - `workspace/models/`    : 승격된 배포 후보(이력도 함께 정리)
+    - `workspace/runs/`      : 학습 산출물(best/last)
+
+    보호 규칙
+    - 현재 **기본 모델(base_model)** 은 지우지 못한다(자동 라벨·학습이 깨진다).
+    - 허용 폴더 밖 경로는 거부한다(경로 탈출·임의 삭제 방지).
+    """
+    s = get_settings()
+    raw = str(target or "").strip()
+    if not raw:
+        raise ValueError("삭제할 가중치 경로가 필요합니다")
+
+    p = Path(raw)
+    candidates = ([p] if p.is_absolute()
+                  else [store.workspace() / p, PROJECT_ROOT / p,
+                        s.model_dir / p, store.models_root() / p])
+    path = next((c for c in candidates if c.exists()), None)
+    if path is None:
+        raise KeyError(f"가중치 파일을 찾을 수 없습니다: {raw}")
+    rp = path.resolve()
+
+    allowed = [s.model_dir.resolve(), store.models_root().resolve(),
+               (store.workspace() / "runs").resolve()]
+    if not any(_is_within(rp, root) for root in allowed):
+        raise ValueError("가중치 폴더 밖의 파일은 지울 수 없습니다.")
+
+    if s.base_model.exists() and rp == s.base_model.resolve():
+        raise ValueError("기본 모델은 삭제할 수 없습니다. 먼저 다른 모델을 기본값으로 지정하세요.")
+
+    rp.unlink()
+
+    # workspace/models/ 파일이면 승격 이력(registry.json)도 함께 지운다.
+    removed_promotion = 0
+    if _is_within(rp, store.models_root().resolve()):
+        doc = _load()
+        before = len(doc["models"])
+        doc["models"] = [m for m in doc["models"] if m.get("alias") != rp.stem]
+        removed_promotion = before - len(doc["models"])
+        if removed_promotion:
+            _save(doc)
+
+    return {"deleted": store.rel_to_workspace(path) or rp.as_posix(),
+            "removed_promotion": removed_promotion}

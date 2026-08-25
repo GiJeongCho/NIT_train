@@ -100,9 +100,13 @@ class Settings:
     #
     # OBB 가중치를 기본으로 쓴다. 목표 산출물이 `train_data/preprocessed_obb` 와 같은
     # 회전박스 데이터셋이고, 축정렬 모델(yolo26l.pt)로는 회전 초안을 만들 수 없다.
-    # 사전학습 클래스도 DOTA 항공영상 계열이라 드론 영상에 훨씬 잘 맞는다.
-    # 축정렬로 가려면 NIT_TRAIN_BASE_MODEL=yolo26l.pt + NIT_TRAIN_TASK=detect.
-    base_model: Path = field(default_factory=lambda: PROJECT_ROOT / "test_model" / "yolo26l-obb.pt")
+    #
+    # tracker_py 프로덕션 OBB 모델(7종 전차 학습 완료)을 기본으로 쓴다. 일반 사전학습
+    # (yolo26l-obb.pt / DOTA)은 전차 클래스를 모르므로 자동 라벨이 초반만 잡히거나
+    # 비어 있게 된다. 이 모델은 tracker_py 와 동일한 추론 결과를 재사용하기 위한 것이며,
+    # 같은 도메인 파인튜닝의 출발점으로도 이상적이다.
+    # 일반 사전학습으로 되돌리려면 NIT_TRAIN_BASE_MODEL=yolo26l-obb.pt (축정렬은 yolo26l.pt).
+    base_model: Path = field(default_factory=lambda: PROJECT_ROOT / "test_model" / "tracker_obb_best.pt")
 
     # ── 추론(자동 라벨 초안) ───────────────────────────────────────────
     device: str = "0"                 # CUDA 인덱스 또는 "cpu"
@@ -229,7 +233,7 @@ class Settings:
             workspace_dir=workspace,
             upload_dir=_env_path("NIT_TRAIN_UPLOAD_DIR", workspace / "uploads"),
             model_dir=model_dir,
-            base_model=_env_path("NIT_TRAIN_BASE_MODEL", model_dir / "yolo26l-obb.pt"),
+            base_model=_env_path("NIT_TRAIN_BASE_MODEL", model_dir / "tracker_obb_best.pt"),
             device=_env_str("NIT_TRAIN_DEVICE", "0"),
             autolabel_conf=_env_float("NIT_TRAIN_AUTOLABEL_CONF", 0.25),
             autolabel_iou=_env_float("NIT_TRAIN_AUTOLABEL_IOU", 0.7),

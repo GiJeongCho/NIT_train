@@ -702,11 +702,12 @@ async def extract_frames(video_id: str, req: ExtractRequest) -> JSONResponse:
 async def list_frames(
     video_id: str,
     status: Optional[str] = Query(None, description="pending | approved | rejected"),
+    kind: Optional[str] = Query(None, description="normal | abnormal (구간 종류)"),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     detail: bool = Query(False, description="객체 도형까지 포함(재생용)"),
 ) -> JSONResponse:
-    return JSONResponse(annotations.list_frames(video_id, status=status,
+    return JSONResponse(annotations.list_frames(video_id, status=status, kind=kind,
                                                 offset=offset, limit=limit, detail=detail))
 
 
@@ -1120,6 +1121,22 @@ async def download_model(alias: str) -> FileResponse:
     path = registry.model_file(alias)
     return FileResponse(path, media_type="application/octet-stream",
                         filename=f"{alias}.pt")
+
+
+@router.delete(
+    "/api/models/weights",
+    tags=[_TAG_MODEL],
+    summary="가중치 파일 삭제",
+    description=(
+        "'사용 가능한 가중치' 목록의 파일 하나를 실제로 지운다. `path` 는 워크스페이스 "
+        "상대경로 또는 절대경로. `test_model/`·`workspace/models/`·`workspace/runs/` 안의 "
+        "파일만 허용하며, 현재 **기본 모델**은 지울 수 없다. 승격 모델이면 이력도 함께 삭제한다."
+    ),
+)
+async def delete_weight_file(
+    path: str = Query(..., description="지울 가중치의 워크스페이스 상대/절대 경로"),
+) -> JSONResponse:
+    return JSONResponse(registry.delete_weight(path))
 
 
 @router.delete("/api/models/{alias}", tags=[_TAG_MODEL], summary="승격 취소(파일+이력 삭제)")

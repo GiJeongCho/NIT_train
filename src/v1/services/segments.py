@@ -160,3 +160,46 @@ def selection_ranges(video_id: str, include: Optional[Sequence[str]] = None) -> 
 
     cut = [(float(s["start_sec"]), float(s["end_sec"])) for s in segs if s.get("kind") not in wanted]
     return _subtract(base, cut)
+
+
+def selection_plan(video_id: str, include: Optional[Sequence[str]] = None
+                   ) -> List[Tuple[float, float, str]]:
+    """추출할 구간을 **종류 표시와 함께** 돌려준다: [(start, end, kind), ...].
+
+    `selection_ranges` 는 여러 종류를 합쳐 kind 를 잃어버리므로, 프레임마다
+    정상/비정상을 구분해 저장해야 하는 추출용으로는 이 함수를 쓴다.
+
+    규칙
+    - 겹치면 비정상이 이긴다(사람이 "이 부분은 이상하다"고 한 쪽을 존중).
+    - 정상 구간을 하나도 안 찍었으면 (비정상을 뺀) 영상 전체를 정상으로 본다.
+    - `include` 로 뽑을 종류를 고른다(기본 정상만). 보통 ("normal","abnormal") 로 둘 다 뽑는다.
+    """
+    wanted = tuple(include) if include else ("normal",)
+    for k in wanted:
+        if k not in KINDS:
+            raise ValueError(f"kind 는 {list(KINDS)} 중 하나여야 합니다: {k!r}")
+
+    meta = video_svc.get_meta(video_id)
+    duration = float(meta.get("duration_sec") or 0.0)
+    segs = get(video_id).get("segments") or []
+    abnormal = _merge([(float(s["start_sec"]), float(s["end_sec"]))
+                       for s in segs if s.get("kind") == "abnormal"])
+
+    out: List[Tuple[float, float, str]] = []
+    if "abnormal" in wanted:
+        out.extend((a, b, "abnormal") for a, b in abnormal)
+
+    if "normal" in wanted:
+        normal_segs = [(float(s["start_sec"]), float(s["end_sec"]))
+                       for s in segs if s.get("kind") == "normal"]
+        if normal_segs:
+            base = _merge(normal_segs)
+        else:
+            # 정상 구간을 안 찍었으면 영상 전체를 정상으로 본다(비정상은 아래서 뺀다).
+            if duration <= 0:
+                raise ValueError("영상 길이를 알 수 없어 전체 구간을 쓸 수 없습니다. 구간을 직접 지정하세요.")
+            base = [(0.0, duration)]
+        out.extend((a, b, "normal") for a, b in _subtract(base, abnormal))
+
+    out.sort(key=lambda r: (r[0], r[2]))
+    return out

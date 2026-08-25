@@ -40,22 +40,36 @@ from services.jobs import Job
 OVERWRITE_MODES = ("skip", "auto", "all")
 
 
-def _plan(fps: float, ranges: Sequence[Tuple[float, float]], stride: int,
+def _plan(fps: float, ranges: Sequence[Tuple[float, float, str]], stride: int,
           max_frames: int) -> List[Tuple[int, int, str]]:
-    """뽑을 프레임 인덱스 계획. (start_idx, end_idx, ...) 대신 실제 인덱스 목록을 만든다.
+    """뽑을 프레임 인덱스 계획. (frame_idx, frame_idx, kind) 목록을 만든다.
 
-    미리 목록을 만드는 이유: 진행률(total)을 정확히 보여줄 수 있고, 상한(max_frames)에
-    걸릴 때 어디까지 뽑았는지가 결정적(deterministic)이 된다.
+    `ranges` 는 (start_sec, end_sec, kind) 로, 프레임마다 정상/비정상을 그대로 물려
+    저장한다(정상은 자동 승인, 비정상은 검수 대기). 미리 목록을 만드는 이유: 진행률
+    (total)을 정확히 보여줄 수 있고, 상한(max_frames)에 걸릴 때 어디까지 뽑았는지가
+    결정적(deterministic)이 된다.
+
+    같은 프레임 인덱스가 정상·비정상 양쪽에 걸리면 비정상을 남긴다(사람이 봐야 하므로).
     """
-    out: List[Tuple[int, int, str]] = []
-    for start_sec, end_sec in ranges:
+    picked: dict = {}
+    for start_sec, end_sec, kind in ranges:
         start_idx = int(math.floor(start_sec * fps))
         end_idx = int(math.ceil(end_sec * fps))
-        for idx in range(start_idx, end_idx + 1, stride):
-            out.append((idx, idx, "normal"))
-            if len(out) >= max_frames:
-                return out
-    return out
+        # 전 구간 공통 그리드(stride 배수)에 스냅한다. 구간 경계가 바뀌어도 프레임 인덱스가
+        # 고정돼, 재추출(overwrite=auto) 시 같은 frame_id 를 갱신한다 → 중복·고아 프레임 방지.
+        first = ((start_idx + stride - 1) // stride) * stride
+        for idx in range(first, end_idx + 1, stride):
+            prev = picked.get(idx)
+            if prev == "abnormal":
+                continue                       # 비정상이 이긴다 — 유지
+            if prev is None:
+                if len(picked) >= max_frames:
+                    break                      # 상한 도달 → 새 프레임은 그만
+                picked[idx] = kind
+            elif kind == "abnormal":
+                picked[idx] = "abnormal"       # 정상 → 비정상 승격(개수 증가 없음)
+    # 오름차순 인덱스로 반환 → 트래커가 순차 처리해 track_id 가 이어진다.
+    return [(idx, idx, picked[idx]) for idx in sorted(picked)]
 
 
 def start(video_id: str, params: Optional[dict] = None) -> Job:
@@ -66,7 +80,7 @@ def start(video_id: str, params: Optional[dict] = None) -> Job:
     # 잡을 띄우기 전에 검증해 사용자가 즉시 에러를 받게 한다(잡 안에서 죽으면 늦다).
     video_svc.get_meta(video_id)
     kinds = params.get("kinds") or ["normal"]
-    segments_svc.selection_ranges(video_id, kinds)
+    segments_svc.selection_plan(video_id, kinds)
     model_path = resolve_model_path(params.get("model"))
     if not model_path.exists():
         raise ValueError(f"모델 파일을 찾을 수 없습니다: {params.get('model') or model_path}")
@@ -123,7 +137,7 @@ def _should_write(video_id: str, frame_id: str, mode: str) -> bool:
 def _run(job: Job, video_id: str, spec: dict) -> None:
     meta = video_svc.get_meta(video_id)
     fps = float(meta.get("fps") or 30.0)
-    ranges = segments_svc.selection_ranges(video_id, spec["kinds"])
+    ranges = segments_svc.selection_plan(video_id, spec["kinds"])
     if not ranges:
         raise ValueError("선택된 구간이 없습니다. 정상 구간을 지정하거나 비정상 구간을 줄이세요.")
 
@@ -131,8 +145,16 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
     plan = _plan(fps, ranges, stride, spec["max_frames"])
     if not plan:
         raise ValueError("추출할 프레임이 없습니다(구간이 너무 짧습니다).")
+    n_abnormal_ranges = sum(1 for _, _, k in ranges if k == "abnormal")
+    # 구간이 바뀌어 어긋난 이전 자동·검수전 프레임(고아/중복)을 먼저 정리한다.
+    # 사람이 손댄(manual/approved/rejected) 프레임은 건드리지 않는다.
+    pruned = 0
+    if spec["overwrite"] in ("auto", "all"):
+        planned_ids = {annotations.frame_id_for(idx) for idx, _, _ in plan}
+        pruned = annotations.prune_auto_pending(video_id, planned_ids)
     job.set_total(len(plan))
-    job.message = f"{len(plan)}장 추출 예정 (stride={stride}, 구간 {len(ranges)}개)"
+    job.message = (f"{len(plan)}장 추출 예정 (stride={stride}, 구간 {len(ranges)}개"
+                   f", 비정상 {n_abnormal_ranges}개, 고아 정리 {pruned}장)")
 
     detector = get_detector(spec["model"])
     # 영상이 바뀌면 트랙 상태를 비운다. 안 비우면 이전 영상의 track_id 가 이어져
@@ -151,6 +173,7 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
 
     written = 0
     skipped = 0
+    auto_approved = 0
     n_objects = 0
     daynight_counts = {"day": 0, "night": 0, "off": 0}
     dehazed = 0
@@ -205,11 +228,20 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
                 daynight=info["lowlight"], dehaze=info["dehaze"],
                 clahe=info.get("clahe", False), preprocess=prep,
             )
+            # 정책(사용자 지정): 정상 구간은 사람 검수가 필요 없다 → 자동 라벨을 그대로
+            # 승인 상태로 저장해 바로 학습에 들어가게 한다. 비정상 구간은 pending 으로 남겨
+            # 3·라벨링에서 사람이 수정한다. 단, 정상이라도 클래스 미확정 객체가 있으면
+            # (모델 클래스와 어긋난 경우) 승인하지 않고 pending 으로 두어 검수에 노출한다.
+            if kind == "normal" and not annotations.unresolved(doc):
+                doc["status"] = "approved"
+                for o in doc.get("objects") or []:
+                    o["verified"] = True
+                auto_approved += 1
             annotations.save(video_id, frame_id, doc)
 
             written += 1
             n_objects += len(objects)
-            job.advance(1, f"{written}장 라벨링 (객체 {n_objects}개, 야간 {daynight_counts['night']}장)")
+            job.advance(1, f"{written}장 라벨링 (객체 {n_objects}개, 자동승인 {auto_approved}장, 야간 {daynight_counts['night']}장)")
     finally:
         cap.release()
 
@@ -217,9 +249,11 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
         "video_id": video_id,
         "frames_written": written,
         "frames_skipped": skipped,
+        "frames_pruned": pruned,
+        "frames_auto_approved": auto_approved,
         "objects": n_objects,
         "stride": stride,
-        "ranges": [[round(a, 3), round(b, 3)] for a, b in ranges],
+        "ranges": [[round(a, 3), round(b, 3), k] for a, b, k in ranges],
         "model": model_name,
         "tracked": spec["track"],
         "preprocess": prep,
@@ -234,4 +268,5 @@ def _run(job: Job, video_id: str, spec: dict) -> None:
         f", 야간보정 {daynight_counts['night']}장(주간 {daynight_counts['day']})")
     _dehaze = f", 안개제거 {dehazed}장" if prep.get("dehaze") else ""
     _clahe = f", CLAHE {clahed}장" if prep.get("clahe") else ""
-    job.message = f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개{_lowlight}{_dehaze}{_clahe}"
+    _approved = f", 정상 자동승인 {auto_approved}장(비정상은 검수 대기)" if auto_approved else ""
+    job.message = f"완료: {written}장 저장, {skipped}장 건너뜀, 객체 {n_objects}개{_approved}{_lowlight}{_dehaze}{_clahe}"

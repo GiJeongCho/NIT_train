@@ -319,7 +319,8 @@ def detail_view(doc: dict) -> dict:
     return base
 
 
-def list_frames(video_id: str, *, status: Optional[str] = None, offset: int = 0,
+def list_frames(video_id: str, *, status: Optional[str] = None,
+                kind: Optional[str] = None, offset: int = 0,
                 limit: int = 100, detail: bool = False) -> dict:
     fids = store.list_frame_ids(video_id)
     project = detail_view if detail else summarize
@@ -329,6 +330,8 @@ def list_frames(video_id: str, *, status: Optional[str] = None, offset: int = 0,
         if not isinstance(doc, dict):
             continue
         if status and doc.get("status") != status:
+            continue
+        if kind and doc.get("segment_kind") != kind:
             continue
         items.append(project(doc))
     total = len(items)
@@ -391,6 +394,26 @@ def delete_frame(video_id: str, frame_id: str) -> dict:
     label_path(video_id, frame_id).unlink(missing_ok=True)
     image_path(video_id, frame_id).unlink(missing_ok=True)
     return {"video_id": video_id, "frame_id": frame_id, "deleted": True}
+
+
+def prune_auto_pending(video_id: str, keep: set) -> int:
+    """새 추출 계획(keep)에 없는 **자동·검수전(pending) 프레임**을 지운다.
+
+    구간 경계가 바뀌면 이전 추출이 남긴 프레임 인덱스가 새 계획과 어긋나 고아·중복이
+    생긴다. 사람이 승인/수정(manual 또는 approved/rejected)한 프레임은 절대 건드리지
+    않고, 손대지 않은 자동 초안만 정리해 라벨링·데이터셋을 깨끗하게 유지한다.
+    """
+    removed = 0
+    for fid in list(store.list_frame_ids(video_id)):
+        if fid in keep:
+            continue
+        doc = store.read_json(label_path(video_id, fid), None)
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("source") == "auto" and doc.get("status") == "pending":
+            delete_frame(video_id, fid)
+            removed += 1
+    return removed
 
 
 # ── 오버레이(검수 화면용) ──────────────────────────────────────────────

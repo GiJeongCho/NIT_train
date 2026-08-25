@@ -98,7 +98,9 @@ def _resolve_spec(raw: Optional[dict]) -> dict:
     if not names:
         raise ValueError("클래스 목록이 비어 있습니다")
 
-    kinds = [str(k) for k in (raw.get("include_kinds") or ["normal"])]
+    # 정상(자동 승인)과 비정상(사람 수정) 프레임을 모두 학습에 넣는다. only_approved 가
+    # 켜져 있으면 비정상은 사람이 승인해야 들어가고, 정상은 추출 때 자동 승인돼 바로 들어간다.
+    kinds = [str(k) for k in (raw.get("include_kinds") or ["normal", "abnormal"])]
 
     sources = [_resolve_source(ref, task) for ref in (raw.get("base_datasets") or [])]
     if not video_ids and not sources:
