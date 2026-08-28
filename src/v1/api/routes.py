@@ -37,6 +37,7 @@ from services import (
     dataset as dataset_svc,
     detector as detector_svc,
     jobs,
+    propagate as propagate_svc,
     registry,
     segments as segments_svc,
     trainer,
@@ -844,6 +845,93 @@ async def propagate_class(video_id: str, req: PropagateRequest) -> JSONResponse:
         frame_ids=req.frame_ids))
 
 
+class SegmentPointRequest(BaseModel):
+    x: float = Field(..., description="클릭 지점 x (프레임 픽셀 좌표)")
+    y: float = Field(..., description="클릭 지점 y (프레임 픽셀 좌표)")
+    min_area: Optional[float] = Field(None, description="이보다 작은 마스크는 버림(px², 기본 16)")
+    shrink: Optional[float] = Field(None, description="얇은 궤적 돌출부를 잘라내는 강도 0~0.9(기본 0.45, 0이면 안 자름)")
+    shadow: Optional[bool] = Field(None, description="색/밝기 기반 그림자 제거(기본 on). 본체보다 어두운 그림자 픽셀을 떼어냄")
+    clamp_box: Optional[List[float]] = Field(None, description="마스크를 이 사각[x1,y1,x2,y2] 안으로만 남김(밖으로 뻗는 그림자 절단). 생략 시 무제한")
+    neg_points: Optional[List[List[float]]] = Field(None, description="배경(그림자)로 제외할 점들 [[x,y],...]. SAM 에 label=0 으로 넣어 그 지점을 물체에서 뺌")
+
+
+@router.post(
+    "/api/videos/{video_id}/frames/{frame_id}/segment_point",
+    tags=[_TAG_LABEL],
+    summary="점 클릭 누끼 → OBB (대화형)",
+    description=(
+        "저장된 프레임 이미지에서 **찍은 한 점** 주변 물체를 SAM 으로 누끼 따서 회전 박스(OBB) "
+        "4점을 돌려준다. '3·라벨링'에서 Q(누끼 모드)로 물체를 클릭할 때 쓴다.\n\n"
+        "학습에 들어갈 그 저장 이미지에서 세그멘트하므로 라벨과 이미지가 어긋나지 않는다. "
+        "물체를 못 찾으면 `found=false`."
+    ),
+)
+async def segment_point(video_id: str, frame_id: str, req: SegmentPointRequest) -> JSONResponse:
+    return JSONResponse(propagate_svc.segment_point(
+        video_id, frame_id, req.x, req.y,
+        min_area=req.min_area if req.min_area is not None else 16.0,
+        shrink=req.shrink if req.shrink is not None else 0.45,
+        shadow=req.shadow if req.shadow is not None else True,
+        clamp_box=req.clamp_box, neg_points=req.neg_points))
+
+
+class SegmentBoxRequest(BaseModel):
+    box: List[float] = Field(..., description="이전 프레임 박스 [x1,y1,x2,y2] (프레임 픽셀 좌표)")
+    margin: Optional[float] = Field(None, description="박스를 넓혀 이동을 흡수할 비율(기본 0.2)")
+    min_area: Optional[float] = Field(None, description="이보다 작은 마스크는 버림(px², 기본 16)")
+    shrink: Optional[float] = Field(None, description="얇은 궤적 돌출부를 잘라내는 강도 0~0.9(기본 0.45)")
+    shadow: Optional[bool] = Field(None, description="색/밝기 기반 그림자 제거(기본 on)")
+
+
+@router.post(
+    "/api/videos/{video_id}/frames/{frame_id}/segment_box",
+    tags=[_TAG_LABEL],
+    summary="박스 누끼 → OBB (전파용)",
+    description=(
+        "저장된 프레임 이미지에서 **이전 박스 영역**을 프롬프트로 물체를 SAM 으로 락온해 누끼 따 "
+        "회전 박스(OBB) 4점을 돌려준다. W(이전 중심 누끼) 전파에서 물체가 프레임 사이 움직여도 "
+        "놓치지 않도록 점이 아닌 박스로 잡는다. 그림자·궤적은 `shrink`/`shadow` 로 조인다.\n\n"
+        "물체를 못 찾으면 `found=false`."
+    ),
+)
+async def segment_box(video_id: str, frame_id: str, req: SegmentBoxRequest) -> JSONResponse:
+    return JSONResponse(propagate_svc.segment_box(
+        video_id, frame_id, req.box,
+        min_area=req.min_area if req.min_area is not None else 16.0,
+        shrink=req.shrink if req.shrink is not None else 0.45,
+        shadow=req.shadow if req.shadow is not None else True,
+        margin=req.margin if req.margin is not None else 0.2))
+
+
+class PropagateSamRequest(BaseModel):
+    seed_frame_id: str = Field(..., description="박스를 잡아 둔 씨앗 프레임 id (예: f000123)")
+    margin: Optional[float] = Field(None, description="(사용 안 함) 이전 박스-프롬프트 방식의 여유 비율. 지금은 중심점 전파라 무시됨")
+    min_area: Optional[float] = Field(None, description="이보다 작은 마스크는 버림(px², 기본 16)")
+    max_miss: Optional[int] = Field(None, description="연속 실패 허용 횟수, 초과 시 트랙 종료(기본 3)")
+    max_frames: Optional[int] = Field(None, description="전파 최대 프레임 수(안전장치)")
+    shrink: Optional[float] = Field(None, description="얇은 궤적 돌출부를 잘라내는 강도 0~0.9(기본 0.45, 0이면 안 자름)")
+    shadow: Optional[bool] = Field(None, description="색/밝기 기반 그림자 제거(기본 on)")
+
+
+@router.post(
+    "/api/videos/{video_id}/propagate_sam",
+    tags=[_TAG_LABEL],
+    summary="첫 박스로 SAM 누끼 전파 자동 라벨 (작업)",
+    description=(
+        "씨앗 프레임 박스의 **중심점**을 SAM 점-프롬프트로 넣어 누끼→OBB 를 만들고, 그 박스 "
+        "중심을 다음 프레임 점으로 이어 붙여 **비정상 구간 끝까지** 자동 라벨한다('이전 중심 "
+        "누끼 전파'와 같은 방식). 궤적·그림자는 `shrink` 로 조인다.\n\n"
+        "- 대상은 이미 추출·전처리된 저장 프레임이라 학습 이미지와 같은 그림에 라벨이 붙는다.\n"
+        "- 결과는 `pending` 으로 남겨 사람이 검수한다(정상 구간은 라벨링 불필요).\n"
+        "- 씨앗 프레임 자체는 건드리지 않는다.\n\n"
+        "반환된 `job_id` 로 `GET /api/jobs/{job_id}` 진행률을 폴링한다."
+    ),
+)
+async def propagate_sam(video_id: str, req: PropagateSamRequest) -> JSONResponse:
+    job = propagate_svc.start(video_id, req.model_dump(exclude_none=True))
+    return JSONResponse({"ok": True, "job_id": job.id, **job.to_dict()})
+
+
 @router.delete(
     "/api/videos/{video_id}/frames/{frame_id}",
     tags=[_TAG_LABEL],
@@ -1121,6 +1209,23 @@ async def download_model(alias: str) -> FileResponse:
     path = registry.model_file(alias)
     return FileResponse(path, media_type="application/octet-stream",
                         filename=f"{alias}.pt")
+
+
+@router.get(
+    "/api/models/{alias}/metadata.yaml",
+    tags=[_TAG_MODEL],
+    summary="모델 메타(YAML) 내보내기",
+    description=(
+        "승격 모델과 **함께 배포할 메타 YAML**. `task`/`nc`/`names`(클래스 순서)와 출처를 담는다.\n\n"
+        "클래스 이름은 레지스트리 기록이 아니라 **실제 `.pt` 내장값**에서 읽어 가중치와 일치시킨다. "
+        "추론만 하면 `.pt` 하나로 충분하지만(모델에 names 내장), 사람이 클래스 순서를 확인하거나 "
+        "재학습·타 서비스에 넘길 때 이 파일을 함께 두면 안전하다."
+    ),
+)
+async def download_model_metadata(alias: str) -> Response:
+    text = registry.metadata_yaml(alias)
+    return Response(content=text, media_type="application/x-yaml",
+                    headers={"Content-Disposition": f'attachment; filename="{alias}.yaml"'})
 
 
 @router.delete(

@@ -136,6 +136,12 @@ class Settings:
     # startup 에서 기본 가중치를 미리 로드/워밍업할지. 끄면(기본) 첫 추출 작업에서
     # 로드한다. 학습만 쓰는 세션에서 수백 MB 가중치를 헛되게 올리지 않기 위함.
     preload_model: bool = False
+    # ── SAM(누끼) 전파 라벨 ────────────────────────────────────────────
+    # '3·라벨링'에서 첫 프레임 박스만 잡으면, SAM 으로 마스크(누끼)를 따 OBB 를 만들고
+    # 그 박스를 다음 프레임 프롬프트로 이어 붙여 구간 끝까지 자동 라벨한다. ultralytics 에
+    # SAM/SAM2 가 포함돼 있어 새 설치 없이 가중치만 있으면 된다(최초 사용 시 자동 다운로드).
+    # 강한 GPU 면 정확한 sam2_b.pt, CPU/경량은 mobile_sam.pt 로. 파일 경로를 줘도 된다.
+    sam_model: str = "sam2_b.pt"
 
     # ── 프레임 추출 ────────────────────────────────────────────────────
     extract_fps: float = 2.0          # 구간에서 초당 몇 장 뽑을지 (0=모든 프레임)
@@ -246,6 +252,7 @@ class Settings:
             autolabel_emit_ghost=_env_bool("NIT_TRAIN_EMIT_GHOST", True),
             autolabel_track_max_age=max(1, _env_int("NIT_TRAIN_TRACK_MAX_AGE", 3)),
             preload_model=_env_bool("NIT_TRAIN_PRELOAD", False),
+            sam_model=_env_str("NIT_TRAIN_SAM_MODEL", "sam2_b.pt"),
             extract_fps=_env_float("NIT_TRAIN_EXTRACT_FPS", 2.0),
             extract_max_frames=_env_int("NIT_TRAIN_EXTRACT_MAX_FRAMES", 20000),
             frame_jpeg_quality=max(50, min(100, _env_int("NIT_TRAIN_FRAME_JPEG_QUALITY", 92))),

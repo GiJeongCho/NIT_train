@@ -66,6 +66,68 @@ def model_file(alias: str) -> Path:
     return path
 
 
+def _entry(alias: str) -> dict:
+    name = str(alias or "").strip()
+    for m in _load()["models"]:
+        if m.get("alias") == name:
+            return m
+    raise KeyError(f"승격된 모델이 없습니다: {name}")
+
+
+def names_from_weights(path: Path) -> Optional[list]:
+    """`.pt` 에 내장된 클래스 이름을 인덱스 순 리스트로 읽는다(가중치가 곧 진실).
+
+    ultralytics 체크포인트는 `model.names`(=`{0:'a',1:'b'}`)에 클래스 맵을 담는다.
+    실패하면 None 을 돌려주고, 호출자가 레지스트리 기록으로 폴백한다.
+    """
+    try:
+        from ultralytics import YOLO
+        names = YOLO(str(path)).names
+    except Exception as e:  # noqa: BLE001 - 가중치 파싱 실패 시 폴백을 쓰게 한다
+        print(f"[registry] 가중치에서 names 읽기 실패({path.name}): {e}", flush=True)
+        return None
+    if isinstance(names, dict):
+        return [str(names[k]) for k in sorted(names, key=lambda x: int(x))]
+    if isinstance(names, (list, tuple)):
+        return [str(n) for n in names]
+    return None
+
+
+def metadata_yaml(alias: str) -> str:
+    """승격 모델과 **함께 내보낼 메타 YAML** 텍스트.
+
+    클래스 이름/순서는 레지스트리 기록이 아니라 **실제 `.pt` 내장값**에서 읽어, 배포한
+    가중치와 절대 어긋나지 않게 한다(가중치를 못 읽으면 레지스트리 기록으로 폴백).
+    task/nc/names 는 ultralytics/`data.yaml` 서식과 같게 두어 재학습에도 바로 쓸 수 있다.
+    """
+    entry = _entry(alias)
+    path = model_file(alias)  # 경로 검증 + 존재 확인
+    names = names_from_weights(path) or [str(n) for n in (entry.get("class_names") or [])]
+    task = str(entry.get("task") or ("obb" if "obb" in path.name.lower() else "detect"))
+    map50 = (entry.get("metrics") or {}).get("metrics/mAP50(B)")
+
+    lines = [
+        f"# NIT_train 모델 메타 (내보내기 동봉용) — 생성 {store.now_iso()}",
+        f"# alias: {alias}",
+        f"# 학습 run: {entry.get('run_id')} · 가중치: {entry.get('which')}",
+        f"# 데이터셋: {entry.get('dataset_name') or ''} ({entry.get('dataset_id') or ''})",
+        f"# 기반 가중치: {entry.get('base_model') or ''}"
+        + (f" · mAP50: {round(float(map50), 4)}" if map50 is not None else ""),
+        f"# 승격 시각: {entry.get('promoted_at')}",
+        "#",
+        "# names 는 이 폴더의 .pt 에 내장된 클래스 맵에서 읽었습니다(가중치와 일치).",
+        "",
+        f"task: {task}",
+        f"nc: {len(names)}",
+        "names:",
+    ]
+    if names:
+        lines += [f"  {i}: {n}" for i, n in enumerate(names)]
+    else:
+        lines.append("  {}  # 클래스 이름을 확인할 수 없습니다")
+    return "\n".join(lines) + "\n"
+
+
 def promote(run_id: str, *, alias: str, which: str = "best",
             note: str = "", deploy: bool = False) -> dict:
     """학습 결과를 배포 후보로 승격한다."""
