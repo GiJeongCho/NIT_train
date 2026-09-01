@@ -747,6 +747,125 @@ def get(dataset_id: str) -> dict:
     return doc
 
 
+# ── 라벨 미리보기(학습데이터 뷰어) ────────────────────────────────────────
+def _yaml_layout(dataset_id: str) -> dict:
+    """data.yaml 을 읽어 split 별 이미지 폴더 절대경로 + names/task 를 돌려준다.
+
+    빌드/등록/병합 어느 경로로 만든 데이터셋이든 data.yaml 하나로 위치를 파악한다
+    (`path:` + `train|val|test: <dir>/images`). 원본을 참조만 하는 등록 데이터셋도
+    같은 방식으로 실제 이미지 폴더를 찾는다.
+    """
+    import yaml
+
+    yp = store.dataset_yaml_path(dataset_id)
+    if not yp.exists():
+        raise KeyError(f"data.yaml 이 없습니다: {dataset_id}")
+    doc = yaml.safe_load(yp.read_text(encoding="utf-8")) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"data.yaml 형식이 올바르지 않습니다: {dataset_id}")
+    root_raw = str(doc.get("path") or "").strip()
+    root = _abs_dir(root_raw) if root_raw else store.dataset_dir(dataset_id)
+    splits: Dict[str, Path] = {}
+    for key in ("train", "val", "test"):
+        rel = doc.get(key)
+        if not rel:
+            continue
+        p = Path(str(rel))
+        splits[key] = p if p.is_absolute() else (root / p)
+    return {
+        "root": root,
+        "names": _norm_names(doc.get("names")),
+        "task": str(doc.get("task") or "").strip().lower() or None,
+        "splits": splits,
+    }
+
+
+def _norm_split(split) -> str:
+    s = str(split or "train").strip().lower()
+    if s in ("valid", "validation"):
+        return "val"
+    if s not in ("train", "val", "test"):
+        raise ValueError("split 은 train|val|test 중 하나여야 합니다")
+    return s
+
+
+def _parse_label_objects(text: str, names: List[str]) -> List[dict]:
+    """YOLO 라벨 텍스트 → 그리기용 객체(정규화 폴리곤/박스) 리스트.
+
+    obb(`cls x1 y1 … x4 y4`)와 detect(`cls cx cy w h`)를 모두 4점 폴리곤으로 통일한다.
+    좌표는 0~1 정규화 그대로 둔다(프런트가 표시 크기에 곱해 그린다).
+    """
+    objs: List[dict] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            cid = int(float(parts[0]))
+            vals = [float(v) for v in parts[1:]]
+        except ValueError:
+            continue
+        if len(vals) >= 8:  # obb: 8좌표
+            poly = [[vals[i], vals[i + 1]] for i in range(0, 8, 2)]
+        else:               # detect: cxcywh → AABB 4점
+            cx, cy, bw, bh = vals[:4]
+            x1, y1, x2, y2 = cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2
+            poly = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        objs.append({
+            "class_id": cid,
+            "class_name": names[cid] if 0 <= cid < len(names) else str(cid),
+            "poly": [[round(x, 6), round(y, 6)] for x, y in poly],
+            "bbox": [round(min(xs), 6), round(min(ys), 6), round(max(xs), 6), round(max(ys), 6)],
+        })
+    return objs
+
+
+def samples(dataset_id: str, split="train", offset: int = 0, limit: int = 24) -> dict:
+    """데이터셋 이미지 + 라벨(정규화 좌표)을 페이지 단위로 돌려준다(라벨 미리보기용)."""
+    manifest = get(dataset_id)  # 존재 검증
+    layout = _yaml_layout(dataset_id)
+    names = layout["names"] or list(manifest.get("class_names") or [])
+    sp = _norm_split(split)
+    img_dir = layout["splits"].get(sp)
+    out = {
+        "dataset_id": dataset_id, "split": sp, "task": layout["task"],
+        "class_names": names, "offset": int(offset), "limit": int(limit),
+        "total": 0, "items": [],
+    }
+    if img_dir is None or not img_dir.is_dir():
+        return out
+    files = sorted(p.name for p in img_dir.iterdir()
+                   if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    out["total"] = len(files)
+    lbl_dir = img_dir.parent / "labels"
+    for name in files[int(offset):int(offset) + int(limit)]:
+        lbl = lbl_dir / (Path(name).stem + ".txt")
+        objs: List[dict] = []
+        if lbl.is_file():
+            try:
+                objs = _parse_label_objects(lbl.read_text(encoding="utf-8"), names)
+            except OSError:
+                objs = []
+        out["items"].append({"name": name, "objects": objs, "n": len(objs)})
+    return out
+
+
+def sample_image_path(dataset_id: str, split, name: str) -> Path:
+    """split 의 특정 이미지 절대경로. 경로 탈출을 막고 이미지 폴더 안만 허용한다."""
+    layout = _yaml_layout(dataset_id)
+    sp = _norm_split(split)
+    img_dir = layout["splits"].get(sp)
+    if img_dir is None or not img_dir.is_dir():
+        raise KeyError(f"{dataset_id}/{sp}: 이미지 폴더가 없습니다")
+    safe = Path(str(name)).name  # 디렉터리 성분 제거(traversal 방지)
+    p = img_dir / safe
+    if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
+        raise KeyError(f"이미지를 찾을 수 없습니다: {sp}/{safe}")
+    return p
+
+
 def list_datasets() -> list:
     out = []
     for did in store.list_dataset_ids():

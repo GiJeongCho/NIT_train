@@ -262,6 +262,7 @@ def status(run_id: str, *, log_lines: Optional[int] = None) -> dict:
         "metrics": state.get("metrics") or {},
         "best_fitness": state.get("best_fitness"),
         "results_csv": csv,
+        "plots": list_plots(run_id),
         "weights": weights,
         "pid": state.get("pid"),
         "error": state.get("error"),
@@ -307,6 +308,46 @@ def list_runs() -> list:
             "error": state.get("error"),
         })
     return out
+
+
+# ultralytics 가 학습/검증 후 run 폴더에 남기는 대표 그림들(Confusion Matrix·F1 곡선 등).
+_PLOT_FILES = (
+    "confusion_matrix.png",
+    "confusion_matrix_normalized.png",
+    "F1_curve.png",
+    "P_curve.png",
+    "R_curve.png",
+    "PR_curve.png",
+    "results.png",
+    "labels.jpg",
+    "labels_correlogram.jpg",
+)
+
+
+def list_plots(run_id: str) -> list:
+    """run 폴더에 실제로 존재하는 산출 그림 파일명 목록(프런트가 이걸로 이미지 URL 을 만든다)."""
+    d = store.run_output_dir(run_id)
+    if not d.is_dir():
+        return []
+    out = [name for name in _PLOT_FILES if (d / name).is_file()]
+    # 검증 예측 시각화(있으면 앞 몇 장만).
+    try:
+        out += [p.name for p in sorted(d.glob("val_batch*_pred.jpg"))[:4]]
+    except OSError:
+        pass
+    return out
+
+
+def plot_path(run_id: str, name: str) -> Path:
+    """산출 그림 파일 경로. 허용된 파일명만(경로 탈출·임의 파일 접근 방지)."""
+    safe = Path(str(name)).name
+    allowed = safe in _PLOT_FILES or (safe.startswith("val_batch") and safe.endswith(".jpg"))
+    if not allowed:
+        raise ValueError(f"허용되지 않은 산출 그림입니다: {safe}")
+    p = store.run_output_dir(run_id) / safe
+    if not p.is_file():
+        raise KeyError(f"산출 그림이 아직 없습니다: {run_id}/{safe}")
+    return p
 
 
 def weights_path(run_id: str, which: str = "best") -> Path:

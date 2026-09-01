@@ -1064,6 +1064,39 @@ async def delete_dataset(dataset_id: str) -> JSONResponse:
     return JSONResponse(dataset_svc.delete(dataset_id))
 
 
+@router.get(
+    "/api/datasets/{dataset_id}/samples",
+    tags=[_TAG_DATASET],
+    summary="라벨 미리보기 (이미지 + 정규화 라벨)",
+    description=(
+        "학습에 들어갈 이미지와 그 라벨(정규화 폴리곤/박스)을 페이지 단위로 준다. "
+        "프런트가 이미지 위에 OBB 를 겹쳐 그려 '라벨링된 학습데이터'를 확인한다. "
+        "obb·detect 모두 4점 폴리곤으로 통일해 돌려준다."
+    ),
+)
+async def dataset_samples(
+    dataset_id: str,
+    split: str = Query("train", description="train | val | test"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(24, ge=1, le=200),
+) -> JSONResponse:
+    return JSONResponse(dataset_svc.samples(dataset_id, split=split, offset=offset, limit=limit))
+
+
+@router.get(
+    "/api/datasets/{dataset_id}/image",
+    tags=[_TAG_DATASET],
+    summary="데이터셋 이미지 원본",
+    description="라벨 미리보기에서 <img> 로 부를 이미지. split 폴더 안의 파일만 허용한다.",
+)
+async def dataset_image(
+    dataset_id: str,
+    split: str = Query("train"),
+    name: str = Query(..., description="이미지 파일명(디렉터리 성분 없이)"),
+) -> FileResponse:
+    return FileResponse(dataset_svc.sample_image_path(dataset_id, split, name))
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 5. 학습
 # ══════════════════════════════════════════════════════════════════════
@@ -1149,6 +1182,20 @@ async def download_weights(run_id: str, which: str) -> FileResponse:
     path = trainer.weights_path(run_id, which)
     return FileResponse(path, media_type="application/octet-stream",
                         filename=f"{run_id}_{which}.pt")
+
+
+@router.get(
+    "/api/train/{run_id}/plot/{name}",
+    tags=[_TAG_TRAIN],
+    summary="학습 산출 그림 (Confusion Matrix · F1 곡선 등)",
+    description=(
+        "ultralytics 가 학습/검증 후 남기는 그림을 그대로 서빙한다. "
+        "`confusion_matrix.png`, `confusion_matrix_normalized.png`, `F1_curve.png`, "
+        "`PR_curve.png`, `results.png` 등. 존재 여부는 `GET /api/train/{run_id}` 의 `plots` 참고."
+    ),
+)
+async def train_plot(run_id: str, name: str) -> FileResponse:
+    return FileResponse(trainer.plot_path(run_id, name))
 
 
 @router.delete("/api/train/{run_id}", tags=[_TAG_TRAIN], summary="학습 run 삭제")

@@ -122,32 +122,34 @@ def _component_at(mask, x: float, y: float):
 
 
 def _trim_trail(comp, x: float, y: float, shrink: float = 0.35):
-    """움직이는 물체 뒤에 이어진 '가는 궤적/자국'을 잘라내고 물체 본체만 남긴다.
+    """움직이는 물체 뒤에 이어진 '가는 궤적/자국(지나온 자리)'을 잘라내고 본체만 남긴다.
 
-    거리변환으로 클릭 지점 주변의 두꺼운 '본체'만 남긴 뒤, 그 코어를 본체 반경만큼 다시
-    부풀려(원래 마스크 안에서) 형태를 복원한다. 궤적은 본체보다 얇으므로 임계값 아래로 사라진다.
+    거리변환으로 경계에서 `thr` 픽셀 이내를 깎아(에로전) 얇은 궤적을 끊은 뒤, 그 코어를
+    같은 반경만큼 다시 부풀려(오프닝) 본체를 복원한다. 궤적은 본체보다 얇아 사라진다.
 
-    shrink: 0에 가까울수록 원본에 가깝게(덜 자름), 1에 가까울수록 코어만 남김(많이 자름).
+    핵심: 임계값 `thr` 을 **본체 크기에 비례시키지 않고** 얇기(shrink)로만 정한다. 예전에는
+    thr=shrink×본체반경 이라 큰 물체일수록 커널이 커져 모서리가 둥글게 뭉개졌다. 이제 궤적
+    굵기 수준(≈2~11px)으로 고정해, 트레일만 끊기고 본체 형태는 거의 그대로 유지된다.
+
+    shrink: 0이면 자르지 않고, 클수록 더 굵은 돌출부까지 끊는다(0~0.9 권장).
     """
     m = comp.astype("uint8")
     if m.sum() == 0:
+        return m
+    if shrink <= 0:
         return m
     dt = cv2.distanceTransform(m, cv2.DIST_L2, 5)
     peak = float(dt.max())
     if peak < 2.0:
         return m  # 이미 얇음 — 자를 게 없음
-    h, w = m.shape[:2]
-    xi = min(max(int(round(x)), 0), w - 1)
-    yi = min(max(int(round(y)), 0), h - 1)
-    d_click = float(dt[yi, xi])
-    # 본체 반경 추정: 클릭 지점 두께와 전체 최대 두께 중 큰 값을 신뢰.
-    body_r = max(d_click, peak)
-    thr = max(shrink * body_r, 2.0)
+    # 물체 크기와 무관하게 '얇은 정도'로만 임계값 결정 → 큰 물체 모서리 뭉갬 방지.
+    thr = 2.0 + float(shrink) * 10.0          # shrink 0→2px, 0.9→11px
+    thr = min(thr, max(2.0, peak * 0.9))       # 본체보다 크게 깎지 않도록 상한
     core = (dt >= thr).astype("uint8")
     core = _component_at(core, x, y)
     if core is None or core.sum() == 0:
         return m
-    # 코어를 본체 반경만큼 부풀려 원래 마스크와 교집합 → 궤적 없는 본체 복원.
+    # 코어를 같은 반경만큼 부풀려 원래 마스크와 교집합 → 궤적 없는 본체 복원(오프닝).
     k = max(int(round(thr)) * 2 + 1, 3)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     grown = cv2.dilate(core, kernel, iterations=1)
@@ -157,35 +159,39 @@ def _trim_trail(comp, x: float, y: float, shrink: float = 0.35):
 
 
 def _drop_shadow(image_bgr, comp, x: float, y: float, ratio: float = 0.6):
-    """마스크 안에서 **물체 본체보다 뚜렷하게 어두운(그림자)** 픽셀을 색/밝기로 떼어낸다.
+    """마스크에서 본체와 **색이 뚜렷이 다른(그림자/바닥)** 픽셀만 떼어낸다.
 
-    클릭 지점 주변(물체 본체)의 perceptual 밝기(LAB L)를 기준으로, `ratio×본체밝기` 미만인
-    어두운 픽셀을 그림자로 보고 제거한다. 그림자는 물체의 밝은 윗면보다 어둡다는 성질을 쓴다.
-    본체까지 과하게 깎여 마스크가 크게 줄면(어두운 물체 등) 원본 성분을 그대로 유지한다.
+    클릭 지점 주변(본체)의 LAB 중앙색을 기준으로, 각 픽셀의 색 거리(ΔLAB)가 임계값보다 큰
+    픽셀만 제거한다. 그림자는 본체보다 크게 어두워(L 급감) 색 거리가 커지므로 걸리고, 본체와
+    색이 비슷한 픽셀(밝기차가 작은 부분)은 그대로 둔다 → '색깔 차이가 충분히 클 때만' 제거.
+
+    ratio 가 클수록 민감(작은 색차도 제거), 작을수록 보수적(큰 색차만 제거). 본체가 10% 미만
+    으로 줄면(어두운 물체 등 오검) 원본 성분을 그대로 유지한다.
     """
     m = comp.astype("uint8")
     area0 = int(m.sum())
     if area0 == 0 or image_bgr is None or ratio <= 0:
         return m
-    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
-    L = lab[:, :, 0].astype("float32")
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB).astype("float32")
     h, w = m.shape[:2]
     xi = min(max(int(round(x)), 0), w - 1)
     yi = min(max(int(round(y)), 0), h - 1)
-    # 본체 밝기 표본: 클릭 지점 주변 반경 내 마스크 픽셀의 중앙값.
+    # 본체 색 표본: 클릭 지점 주변 반경 내 마스크 픽셀의 LAB 중앙값.
     r = max(3, int(round((area0 ** 0.5) / 4)))
     y0, y1 = max(0, yi - r), min(h, yi + r + 1)
     x0, x1 = max(0, xi - r), min(w, xi + r + 1)
     win_m = m[y0:y1, x0:x1]
-    win_L = L[y0:y1, x0:x1]
-    body_vals = win_L[win_m > 0]
-    if body_vals.size < 5:
-        body_vals = L[m > 0]
-    if body_vals.size == 0:
+    sample = lab[y0:y1, x0:x1][win_m > 0]
+    if sample.shape[0] < 5:
+        sample = lab[m > 0]
+    if sample.shape[0] == 0:
         return m
-    body_L = float(np.median(body_vals))
-    thr = float(ratio) * body_L
-    keep = ((L >= thr).astype("uint8")) & m
+    body = np.median(sample, axis=0)  # [L, a, b]
+    diff = lab - body.reshape(1, 1, 3)
+    dist = np.sqrt(diff[:, :, 0] ** 2 + diff[:, :, 1] ** 2 + diff[:, :, 2] ** 2)
+    # ratio→색거리 임계값. 0.6이면 ~52(=꽤 큰 색차만 제거). 클수록 임계값↓(민감).
+    thr = 130.0 * (1.0 - float(min(max(ratio, 0.0), 0.95)))
+    keep = (m & (dist < thr).astype("uint8")).astype("uint8")
     keep = _component_at(keep, x, y)
     if keep is None:
         return m
@@ -283,9 +289,15 @@ def segment_box(image_bgr, box_xyxy: List[float], *, min_area: float = 16.0,
     masks = segment_boxes(image_bgr, [box_xyxy])
     if not masks or masks[0] is None:
         return None
-    cx = (float(box_xyxy[0]) + float(box_xyxy[2])) / 2.0
-    cy = (float(box_xyxy[1]) + float(box_xyxy[3])) / 2.0
-    comp = tighten_mask(masks[0], cx, cy, shrink,
+    # 조이기 기준점을 stale 한 '이전 박스 중심'이 아니라 **이번에 락온된 마스크의 무게중심**으로
+    # 잡는다. 물체가 프레임 사이 움직여도 기준점이 본체 위에 있어야 그림자/궤적 판정이 정확하다.
+    base = _component_at(masks[0], -1.0, -1.0)  # 좌표 밖 → 최대 성분 선택
+    if base is None or base.sum() == 0:
+        return None
+    ys, xs = np.nonzero(base)
+    cx = float(xs.mean())
+    cy = float(ys.mean())
+    comp = tighten_mask(base, cx, cy, shrink,
                         image_bgr=image_bgr if shadow else None,
                         shadow_ratio=(shadow_ratio if shadow else 0.0))
     if comp is None or comp.sum() == 0:
