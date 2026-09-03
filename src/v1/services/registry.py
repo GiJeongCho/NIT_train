@@ -66,6 +66,41 @@ def model_file(alias: str) -> Path:
     return path
 
 
+def inference_weights(alias: str) -> Path:
+    """**추론 전용**으로 학습 부산물을 떼어낸 가중치 경로를 만든다.
+
+    ultralytics 체크포인트(`.pt`)에는 옵티마이저·EMA·학습 인자 등 **재학습에만 필요한**
+    데이터가 함께 들어있다. 배포/추론에는 모델 가중치만 있으면 되므로 `strip_optimizer`
+    로 그 부분을 떼고(반정밀도로 저장) 파일 크기도 줄인다. 실패하면(라이브러리/포맷 문제)
+    원본을 그대로 쓴다 — 원본도 추론은 가능하기 때문이다.
+    """
+    src = model_file(alias)
+    out = store.models_root() / f"{alias}.infer.pt"
+    try:
+        from ultralytics.utils.torch_utils import strip_optimizer
+        shutil.copy2(src, out)
+        strip_optimizer(str(out))       # 제자리(out)에서 학습용 키 제거 + half 저장
+    except Exception:                    # noqa: BLE001 — 스트립 실패 시 원본으로 폴백
+        shutil.copy2(src, out)
+    return out
+
+
+def bundle_path(alias: str) -> Path:
+    """승격 모델을 **추론 전용 가중치(.pt) + 메타(metadata.yaml)** 한 zip 으로 묶은 경로.
+
+    내보내기 한 번으로 배포에 필요한 두 파일을 같이 받게 한다. 요청마다 새로 굽는다.
+    """
+    import zipfile
+
+    src = inference_weights(alias)      # 학습기 뗀 추론 전용 가중치
+    yaml_text = metadata_yaml(alias)
+    out = store.models_root() / f"{alias}_bundle.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(src, arcname=f"{alias}.pt")
+        zf.writestr("metadata.yaml", yaml_text)
+    return out
+
+
 def _entry(alias: str) -> dict:
     name = str(alias or "").strip()
     for m in _load()["models"]:
@@ -163,8 +198,13 @@ def promote(run_id: str, *, alias: str, which: str = "best",
         "deployed_to": None,
     }
 
+    # 배포는 '있으면 좋은' 부가 단계다. 배포 경로 미설정 등으로 실패해도 **승격(등록)
+    # 자체는 성공**시킨다. 그래야 사용자가 버튼만 눌러도 6·모델에 모델이 남는다.
     if deploy:
-        entry["deployed_to"] = _deploy(dest, name)
+        try:
+            entry["deployed_to"] = _deploy(dest, name)
+        except Exception as e:  # noqa: BLE001 — 배포 실패를 승격 실패로 번지지 않게
+            entry["deploy_warning"] = str(e)
 
     doc = _load()
     doc["models"] = [m for m in doc["models"] if m.get("alias") != name] + [entry]

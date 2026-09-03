@@ -1185,6 +1185,29 @@ async def download_weights(run_id: str, which: str) -> FileResponse:
 
 
 @router.get(
+    "/api/train/{run_id}/metadata.yaml",
+    tags=[_TAG_TRAIN],
+    summary="학습 가중치용 메타 YAML (task·클래스 이름)",
+    description="가중치에 내장된 클래스 맵으로 만든 data.yaml 서식. 재학습/추론 동봉용.",
+)
+async def train_metadata_yaml(run_id: str, which: str = Query("best")) -> Response:
+    return Response(trainer.run_metadata_yaml(run_id, which),
+                    media_type="text/yaml; charset=utf-8")
+
+
+@router.get(
+    "/api/train/{run_id}/bundle",
+    tags=[_TAG_TRAIN],
+    summary="모델+설정 묶음 다운로드 (best.pt + metadata.yaml, zip)",
+    description="가중치와 클래스 정의 YAML 을 한 zip 으로 받는다. 배포 시 둘을 같이 넘기면 된다.",
+)
+async def download_bundle(run_id: str, which: str = Query("best")) -> FileResponse:
+    path = trainer.bundle_path(run_id, which)
+    return FileResponse(path, media_type="application/zip",
+                        filename=f"{run_id}_{which}_bundle.zip")
+
+
+@router.get(
     "/api/train/{run_id}/plot/{name}",
     tags=[_TAG_TRAIN],
     summary="학습 산출 그림 (Confusion Matrix · F1 곡선 등)",
@@ -1246,14 +1269,15 @@ async def promote_model(req: PromoteRequest) -> JSONResponse:
 @router.get(
     "/api/models/{alias}/download",
     tags=[_TAG_MODEL],
-    summary="승격 모델 내보내기(.pt 다운로드)",
+    summary="승격 모델 내보내기(추론 전용 .pt)",
     description=(
-        "승격된 모델 가중치 파일(`workspace/models/<alias>.pt`)을 그대로 내려준다. "
-        "여기서 추론하지 않고, 이 파일을 학습/추론 서버에 가져다 설치하는 용도다."
+        "승격 모델을 **추론 전용**으로 내려준다. 옵티마이저·EMA·학습 인자 등 재학습용 "
+        "데이터를 떼어(strip) 파일이 가볍고 배포에 바로 쓸 수 있다. 학습 이어가기가 필요하면 "
+        "5·학습의 원본 다운로드를 사용한다."
     ),
 )
 async def download_model(alias: str) -> FileResponse:
-    path = registry.model_file(alias)
+    path = registry.inference_weights(alias)
     return FileResponse(path, media_type="application/octet-stream",
                         filename=f"{alias}.pt")
 
@@ -1273,6 +1297,18 @@ async def download_model_metadata(alias: str) -> Response:
     text = registry.metadata_yaml(alias)
     return Response(content=text, media_type="application/x-yaml",
                     headers={"Content-Disposition": f'attachment; filename="{alias}.yaml"'})
+
+
+@router.get(
+    "/api/models/{alias}/bundle",
+    tags=[_TAG_MODEL],
+    summary="모델+설정 묶음 내보내기 (.pt + metadata.yaml, zip)",
+    description="승격 모델의 가중치와 클래스 정의 YAML 을 한 zip 으로 받는다. 배포 시 둘을 같이 넘기면 된다.",
+)
+async def download_model_bundle(alias: str) -> FileResponse:
+    path = registry.bundle_path(alias)
+    return FileResponse(path, media_type="application/zip",
+                        filename=f"{alias}_bundle.zip")
 
 
 @router.delete(

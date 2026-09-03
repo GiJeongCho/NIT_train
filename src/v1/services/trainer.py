@@ -360,6 +360,55 @@ def weights_path(run_id: str, which: str = "best") -> Path:
     return p
 
 
+def run_metadata_yaml(run_id: str, which: str = "best") -> str:
+    """학습 run 의 가중치와 **함께 내보낼 메타 YAML** 텍스트.
+
+    클래스 이름/순서는 spec 기록이 아니라 **실제 `.pt` 내장값**에서 읽어 배포한 가중치와
+    절대 어긋나지 않게 한다(못 읽으면 spec 의 class_names 로 폴백). task/nc/names 를
+    ultralytics/`data.yaml` 서식과 같게 두어 재학습·추론에도 바로 쓸 수 있다.
+    """
+    from services import registry as registry_svc
+
+    spec = store.read_json(store.run_spec_path(run_id), None)
+    if not isinstance(spec, dict):
+        raise KeyError(f"학습 run 을 찾을 수 없습니다: {run_id}")
+    wp = weights_path(run_id, which)  # 존재 검증
+    names = registry_svc.names_from_weights(wp) or [str(n) for n in (spec.get("class_names") or [])]
+    task = str(spec.get("dataset_task") or ("obb" if "obb" in wp.name.lower() else "detect"))
+
+    lines = [
+        f"# NIT_train 모델 메타 (내보내기 동봉용) — 생성 {store.now_iso()}",
+        f"# 학습 run: {run_id} · 가중치: {which}.pt",
+        f"# 데이터셋: {spec.get('dataset_name') or ''} ({spec.get('dataset_id') or ''})",
+        f"# 기반 가중치: {spec.get('model_name') or ''}",
+        "#",
+        "# names 는 이 폴더의 .pt 에 내장된 클래스 맵에서 읽었습니다(가중치와 일치).",
+        "",
+        f"task: {task}",
+        f"nc: {len(names)}",
+        "names:",
+    ]
+    lines += [f"  {i}: {n}" for i, n in enumerate(names)] if names else ["  {}"]
+    return "\n".join(lines) + "\n"
+
+
+def bundle_path(run_id: str, which: str = "best") -> Path:
+    """가중치(`.pt`) + 메타(`metadata.yaml`) 를 한 파일로 묶은 zip 경로.
+
+    프런트의 '모델+설정 내려받기' 한 번으로 배포에 필요한 두 파일을 같이 받게 한다.
+    run 폴더 안에 만들어 두고, 재요청 시 새로 굽는다(가중치가 갱신될 수 있으므로).
+    """
+    import zipfile
+
+    wp = weights_path(run_id, which)
+    yaml_text = run_metadata_yaml(run_id, which)
+    out = store.run_dir(run_id) / f"export_{which}.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(wp, arcname=f"{which}.pt")
+        zf.writestr("metadata.yaml", yaml_text)
+    return out
+
+
 def delete(run_id: str) -> dict:
     state = store.read_json(store.run_state_path(run_id), {}) or {}
     if state.get("status") == "running" and _is_alive(state.get("pid")):
