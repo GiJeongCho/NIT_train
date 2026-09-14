@@ -21,6 +21,7 @@ detect 모델과 obb 모델을 모두 지원한다. detect 모델의 축정렬 �
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -439,13 +440,16 @@ def list_weights() -> List[dict]:
         if rp in seen or not p.exists():
             return
         seen.add(rp)
+        st = p.stat()
         items.append({
             "path": store.rel_to_workspace(p) or p.as_posix(),
             "abs_path": p.as_posix(),
             "name": p.name,
             "origin": origin,
             "task": infer_task(p) or "detect",
-            "size_mb": round(p.stat().st_size / 1e6, 1),
+            "size_mb": round(st.st_size / 1e6, 1),
+            # 파일 생성/수정 시각 = 이 가중치가 만들어진 때. run best.pt 는 학습 완료 시각.
+            "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
             "is_default": rp == s.base_model.resolve() if s.base_model.exists() else False,
         })
 

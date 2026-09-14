@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -43,11 +44,23 @@ def _save(doc: dict) -> dict:
 
 def list_models() -> dict:
     """쓸 수 있는 가중치 전체 + 승격 이력."""
+    promoted = _load()["models"]
+    # 옛 승격 기록엔 trained_at 이 없다 → 모델 파일 mtime(만들어진 시각)으로 폴백해 채운다.
+    for m in promoted:
+        if not m.get("trained_at"):
+            try:
+                p = Path(m.get("abs_path") or "")
+                if p.exists():
+                    st = p.stat()
+                    m["trained_at"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))
+            except Exception:  # noqa: BLE001 — 날짜 폴백 실패는 무시(‘-’ 로 표시됨)
+                pass
     return {
         "default_model": store.rel_to_workspace(get_settings().base_model)
                          or str(get_settings().base_model),
         "weights": detector_svc.list_weights(),
-        "promoted": _load()["models"],
+        "promoted": promoted,
     }
 
 
@@ -194,6 +207,8 @@ def promote(run_id: str, *, alias: str, which: str = "best",
         "best_fitness": st.get("best_fitness"),
         "size_mb": round(dest.stat().st_size / 1e6, 1),
         "note": str(note or ""),
+        # 학습이 끝난(=모델이 만들어진) 시각. 없으면 학습 생성/승격 시각으로 폴백.
+        "trained_at": st.get("finished_at") or spec.get("created_at") or store.now_iso(),
         "promoted_at": store.now_iso(),
         "deployed_to": None,
     }
