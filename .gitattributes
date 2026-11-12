@@ -1,0 +1,17 @@
+# 윈도에서 개발하고 리눅스 컨테이너에서 돌리므로 줄바꿈을 LF 로 통일한다.
+# (셸 스크립트가 CRLF 면 컨테이너에서 실행이 깨진다.)
+* text=auto eol=lf
+
+# 셸 스크립트는 반드시 LF.
+*.sh text eol=lf
+# PowerShell 은 윈도 전용이라 CRLF 유지.
+*.ps1 text eol=crlf
+
+# 바이너리는 diff/eol 변환 금지.
+*.pt      binary
+*.onnx    binary
+*.engine  binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.zip     binary
