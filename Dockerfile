@@ -12,19 +12,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY src /app/src
 COPY test_model /app/test_model
-COPY VERSION /app/VERSION
-
-# ── 버전/빌드 정보 ──────────────────────────────────────────────────────
-# compose/빌드 스크립트가 넘기는 값. 이미지 안(ENV)과 OCI 라벨 양쪽에 박아 둔다.
-# 코드는 NIT_TRAIN_VERSION 를 우선 읽고(없으면 /app/VERSION), /api/version 으로 노출한다.
-ARG VERSION=0.0.0
-ARG GIT_SHA=""
-ARG BUILD_DATE=""
-LABEL org.opencontainers.image.title="nit-train" \
-      org.opencontainers.image.description="NIT 학습/라벨링 API (MLOps)" \
-      org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${GIT_SHA}" \
-      org.opencontainers.image.created="${BUILD_DATE}"
 
 # 모든 상태(영상·프레임·라벨·데이터셋·학습결과)가 여기 하나에 모인다.
 # 반드시 볼륨으로 마운트할 것. 안 하면 컨테이너를 지울 때 라벨링 작업이 사라진다.
@@ -32,9 +19,6 @@ ENV NIT_TRAIN_WORKSPACE=/app/workspace \
     NIT_TRAIN_MODEL_DIR=/app/test_model \
     NIT_TRAIN_HOST=0.0.0.0 \
     NIT_TRAIN_PORT=8888 \
-    NIT_TRAIN_VERSION=${VERSION} \
-    NIT_TRAIN_GIT_SHA=${GIT_SHA} \
-    NIT_TRAIN_BUILD_DATE=${BUILD_DATE} \
     PYTHONUNBUFFERED=1
 VOLUME ["/app/workspace"]
 

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api.routes import router
-from core.config import app_version, build_info, get_settings
+from core.config import get_settings
 from core import store
 
 
@@ -46,10 +46,6 @@ async def lifespan(app: FastAPI):
         print("[init] 기본 가중치 로드 + 워밍업...", flush=True)
         get_detector().warmup()
 
-    bi = build_info()
-    print(f"[init] 버전 {bi['version']}"
-          + (f" (git {bi['git_sha'][:12]})" if bi["git_sha"] else "")
-          + (f" build {bi['build_date']}" if bi["build_date"] else ""), flush=True)
     print(f"[init] 준비 완료 → http://{s.host}:{s.port}/docs", flush=True)
     yield
 
@@ -57,7 +53,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(
         title="NIT 학습 API (MLOps)",
-        version=app_version(),
+        version="1.0.0",
         description=(
             "드론/CCTV 영상 → 구간 선별 → 자동 라벨 초안 → 사람 검수 → 데이터셋 → "
             "YOLO 학습 → 모델 승격까지의 파이프라인 API."
