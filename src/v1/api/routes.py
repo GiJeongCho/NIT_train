@@ -28,7 +28,7 @@ from fastapi import APIRouter, Body, File, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.config import get_settings
+from core.config import build_info, get_settings
 from core import store
 from services import (
     annotations,
@@ -73,6 +73,16 @@ async def healthz() -> JSONResponse:
 
 
 @router.get(
+    "/api/version",
+    tags=[_TAG_MISC],
+    summary="버전/빌드 정보",
+    description="배포 추적용. 떠 있는 이미지의 버전·깃 커밋·빌드 시각을 반환한다.",
+)
+async def version() -> JSONResponse:
+    return JSONResponse(build_info())
+
+
+@router.get(
     "/api/meta",
     tags=[_TAG_MISC],
     summary="서버 설정/기본값 조회",
@@ -83,8 +93,10 @@ async def healthz() -> JSONResponse:
 )
 async def meta() -> JSONResponse:
     s = get_settings()
+    bi = build_info()
     return JSONResponse({
-        "version": "1.0.0",
+        "version": bi["version"],
+        "build": bi,
         "workspace": str(s.workspace_dir),
         "device": s.device,
         "default_model": store.rel_to_workspace(s.base_model) or str(s.base_model),
