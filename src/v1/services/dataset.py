@@ -39,6 +39,7 @@ services/dataset.py
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -220,10 +221,213 @@ def read_yolo_dir(path) -> dict:
     }
 
 
+# ── Roboflow COCO 폴더 지원 ────────────────────────────────────────────
+# 외부(로보플로우 등)에서 받은 데이터셋은 흔히 COCO(`_annotations.coco.json` + 이미지)
+# 형식이다. YOLO 구조가 아니므로 등록 시 **YOLO-OBB 로 변환해 워크스페이스에 굳힌다**.
+def _coco_categories(doc: dict) -> list:
+    """COCO categories → 실제 클래스 목록(로보플로우 루트 더미 supercategory='none' 제외)."""
+    cats = sorted(doc.get("categories") or [], key=lambda c: c.get("id", 0))
+    real = [c for c in cats if str(c.get("supercategory", "")).strip().lower() != "none"]
+    return real or cats
+
+
+def _find_coco_json(d: Path) -> Optional[Path]:
+    if not d.is_dir():
+        return None
+    pref = sorted(d.glob("*_annotations.coco.json"))
+    if pref:
+        return pref[0]
+    for p in sorted(d.glob("*.json")):
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(doc, dict) and {"images", "annotations", "categories"} <= set(doc):
+            return p
+    return None
+
+
+def read_coco_dir(path) -> dict:
+    """COCO 폴더 구조를 읽는다(등록 미리보기·변환의 입구).
+
+    `{train,valid,test}/` 각 폴더 안에 `_annotations.coco.json` 이 있는 로보플로우
+    내보내기를 대상으로 한다. 스플릿 폴더가 없으면 루트의 json 을 train 으로 본다.
+    """
+    root = _abs_dir(path)
+    if not root.is_dir():
+        raise ValueError(f"폴더를 찾을 수 없습니다: {root}")
+
+    split_json: Dict[str, tuple] = {}
+    for split, aliases in _SPLIT_DIRS.items():
+        for alias in aliases:
+            j = _find_coco_json(root / alias)
+            if j:
+                split_json[split] = (alias, j)
+                break
+    if not split_json:
+        j = _find_coco_json(root)
+        if j:
+            split_json["train"] = (".", j)
+    if not split_json:
+        raise ValueError(
+            f"YOLO/COCO 데이터셋 폴더가 아닙니다(_annotations.coco.json 없음): {root}")
+
+    names: List[str] = []
+    splits: Dict[str, dict] = {}
+    for split, (alias, j) in split_json.items():
+        doc = json.loads(j.read_text(encoding="utf-8"))
+        if not names:
+            names = [str(c["name"]) for c in _coco_categories(doc)]
+        annotated = {a.get("image_id") for a in (doc.get("annotations") or [])}
+        splits[split] = {
+            "dir": alias, "json": j.name,
+            "images": len(doc.get("images") or []),
+            "labels": len(annotated),
+        }
+    return {
+        "dir": root, "coco": True, "yaml": None,
+        "names": names, "task": "obb",
+        "splits": splits,
+        "total_images": sum(v["images"] for v in splits.values()),
+    }
+
+
+def _import_coco(raw: dict, info: dict) -> dict:
+    """COCO 폴더를 YOLO-OBB 로 변환해 워크스페이스 데이터셋으로 굳힌다.
+
+    COCO bbox `[x,y,w,h]`(축정렬)를 회전 0 인 4점 폴리곤(OBB)으로 쓴다(detect 요청 시
+    cxcywh). 라벨이 JSON 에 있으므로 참조만 하는 등록은 불가능해 **항상 복사(굳힘)** 한다.
+    """
+    s = get_settings()
+    root = info["dir"]
+    task = str(raw.get("task") or info.get("task") or "obb").lower()
+    if task not in TASKS:
+        raise ValueError(f"task 는 {list(TASKS)} 중 하나여야 합니다: {task!r}")
+    names = [str(x) for x in (raw.get("class_names") or info["names"])]
+    if not names:
+        raise ValueError(f"클래스(categories)를 찾을 수 없습니다: {root}")
+
+    link = bool(raw.get("link_images", s.dataset_link_images))
+    spec = {
+        "name": str(raw.get("name") or "").strip() or root.name,
+        "task": task, "class_names": names, "link_images": link,
+    }
+
+    dataset_id = store.new_id()
+    ddir = store.dataset_dir(dataset_id)
+    ddir.mkdir(parents=True, exist_ok=True)
+    for split in SPLITS:
+        (ddir / split / "images").mkdir(parents=True, exist_ok=True)
+        (ddir / split / "labels").mkdir(parents=True, exist_ok=True)
+
+    counts = {k: 0 for k in SPLITS}
+    objects = {k: 0 for k in SPLITS}
+    class_hist: Dict[str, int] = {}
+    tag = _tag_for(spec["name"], set())
+
+    def _clip(v: float) -> float:
+        return round(min(max(v, 0.0), 1.0), 6)
+
+    for split, meta in info["splits"].items():
+        src_dir = root if meta["dir"] == "." else root / meta["dir"]
+        doc = json.loads((src_dir / meta["json"]).read_text(encoding="utf-8"))
+        idx_by_catid = {}
+        for c in _coco_categories(doc):
+            nm = str(c["name"])
+            if nm in names:
+                idx_by_catid[c.get("id")] = names.index(nm)
+        by_img: Dict[int, list] = {}
+        for a in doc.get("annotations") or []:
+            by_img.setdefault(a.get("image_id"), []).append(a)
+        for im in doc.get("images") or []:
+            fn = im.get("file_name")
+            W, H = im.get("width"), im.get("height")
+            if not fn or not W or not H:
+                continue
+            src_img = src_dir / fn
+            if not src_img.is_file():
+                continue
+            stem = f"{tag}_{Path(fn).stem}"
+            _place_image(src_img, ddir / split / "images" / f"{stem}{Path(fn).suffix.lower()}", link)
+            lines: List[str] = []
+            for a in by_img.get(im.get("id"), []):
+                cid = idx_by_catid.get(a.get("category_id"))
+                bbox = a.get("bbox") or []
+                if cid is None or len(bbox) < 4:
+                    continue
+                x, y, w, h = bbox[:4]
+                if w <= 0 or h <= 0:
+                    continue
+                x1, y1, x2, y2 = _clip(x / W), _clip(y / H), _clip((x + w) / W), _clip((y + h) / H)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                if task == "obb":
+                    lines.append(f"{cid} {x1} {y1} {x2} {y1} {x2} {y2} {x1} {y2}")
+                else:
+                    lines.append(f"{cid} {_clip((x1 + x2) / 2)} {_clip((y1 + y2) / 2)} "
+                                 f"{_clip(x2 - x1)} {_clip(y2 - y1)}")
+                class_hist[names[cid]] = class_hist.get(names[cid], 0) + 1
+                objects[split] += 1
+            (ddir / split / "labels" / f"{stem}.txt").write_text(
+                ("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+            counts[split] += 1
+
+    _write_yaml(store.dataset_yaml_path(dataset_id), ddir, spec, counts, {k: k for k in SPLITS})
+
+    # 새 클래스(전차 종류 등)를 프로젝트 목록에 등록해두면 라벨링·병합에서 바로 쓴다.
+    registered = _register_classes(names)
+
+    warnings: List[str] = []
+    if counts["valid"] == 0:
+        warnings.append("valid 세트가 없습니다. 학습 중 검증과 best 선택이 무의미해집니다.")
+    if registered:
+        warnings.append(f"새 클래스 {len(registered)}개를 프로젝트 목록에 추가했습니다: "
+                        + ", ".join(registered))
+
+    manifest = {
+        "dataset_id": dataset_id,
+        "name": spec["name"],
+        "task": task,
+        "created_at": store.now_iso(),
+        "imported": True,
+        "copied": True,
+        "source_dir": root.as_posix(),
+        "source_yaml": None,
+        "source_format": "coco",
+        "spec": {**spec, "path": root.as_posix(), "copy": True},
+        "counts": counts,
+        "objects": objects,
+        "total_frames": sum(counts.values()),
+        "total_objects": sum(objects.values()),
+        "class_names": names,
+        "class_histogram": dict(sorted(class_hist.items(), key=lambda kv: -kv[1])),
+        "per_video_frames": {},
+        "sources": [],
+        "excluded": {},
+        "warnings": warnings,
+        "data_yaml": store.rel_to_workspace(store.dataset_yaml_path(dataset_id)),
+    }
+    store.write_json(store.dataset_manifest_path(dataset_id), manifest)
+    return manifest
+
+
+def _register_classes(names: List[str]) -> List[str]:
+    """프로젝트 클래스 목록에 없는 이름만 뒤에 추가한다. 추가된 이름 목록을 돌려준다."""
+    cur = classes_svc.names()
+    added = [n for n in names if n and n not in cur]
+    if added:
+        classes_svc.put(cur + added)
+    return added
+
+
 def inspect(path) -> dict:
-    """등록 전에 폴더를 미리 보여주기 위한 조회(프런트 확인용)."""
-    info = read_yolo_dir(path)
-    return {**info, "dir": info["dir"].as_posix()}
+    """등록 전에 폴더를 미리 보여주기 위한 조회(프런트 확인용). YOLO 우선, 아니면 COCO."""
+    try:
+        info = read_yolo_dir(path)
+        return {**info, "dir": info["dir"].as_posix(), "format": "yolo"}
+    except ValueError:
+        info = read_coco_dir(path)
+        return {**info, "dir": info["dir"].as_posix(), "format": "coco"}
 
 
 def _resolve_source(ref: str, task: str) -> dict:
@@ -645,7 +849,11 @@ def import_dir(raw: Optional[dict] = None) -> dict:
     """
     s = get_settings()
     raw = dict(raw or {})
-    info = read_yolo_dir(raw.get("path") or "")
+    # YOLO 우선. 아니면 COCO(_annotations.coco.json)로 보고 YOLO-OBB 로 변환해 굳힌다.
+    try:
+        info = read_yolo_dir(raw.get("path") or "")
+    except ValueError:
+        return _import_coco(raw, read_coco_dir(raw.get("path") or ""))
     root = info["dir"]
 
     task = str(raw.get("task") or info["task"] or s.dataset_task).lower()
@@ -735,6 +943,71 @@ def import_dir(raw: Optional[dict] = None) -> dict:
     }
     store.write_json(store.dataset_manifest_path(dataset_id), manifest)
     return manifest
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 업로드 zip 등록 (드래그앤드롭)
+# ══════════════════════════════════════════════════════════════════════
+# 브라우저는 드롭한 폴더의 서버 경로를 줄 수 없다(보안). 그래서 데이터셋을 zip 으로 받아
+# 임시로 풀고, 위 import_dir(YOLO/COCO 자동판별)로 워크스페이스에 굳힌 뒤 임시본을 지운다.
+def _resolve_dataset_root(base: Path) -> Path:
+    """압축을 푼 폴더에서 실제 데이터셋 루트를 찾는다.
+
+    로보플로우/일반 내보내기는 zip 안에 단일 상위 폴더를 두는 경우가 흔하다
+    (`<name>/data.yaml`, `<name>/train/...`). 루트에서 바로 인식되지 않으면 한 단계
+    아래(하위 폴더)까지 내려가 YOLO/COCO 구조가 잡히는 첫 폴더를 쓴다.
+    """
+    def _ok(d: Path) -> bool:
+        for reader in (read_yolo_dir, read_coco_dir):
+            try:
+                reader(d)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    if _ok(base):
+        return base
+    for p in sorted(base.iterdir()):
+        if p.is_dir() and _ok(p):
+            return p
+    raise ValueError(
+        "zip 안에서 YOLO/COCO 데이터셋 구조를 찾지 못했습니다. "
+        "`data.yaml` + train/valid/test 또는 `_annotations.coco.json` 이 있어야 합니다."
+    )
+
+
+def import_zip(zip_path, raw: Optional[dict] = None) -> dict:
+    """업로드된 데이터셋 zip 을 풀어 데이터셋으로 등록한다(항상 스냅샷 고정).
+
+    드래그앤드롭 업로드 경로다. 참조 등록(copy=false)은 임시 폴더가 사라지면 깨지므로
+    **항상 복사(copy=true, COCO 는 원래 복사)** 로 굳힌다. 이미지는 하드링크로 데이터셋
+    폴더에 걸린 뒤 임시 폴더를 지워도(같은 볼륨) 데이터가 남는다.
+    """
+    import zipfile
+
+    raw = dict(raw or {})
+    staging = store.workspace() / ".import_staging" / store.new_id()
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        try:
+            zf = zipfile.ZipFile(str(zip_path))
+        except zipfile.BadZipFile:
+            raise ValueError("올바른 zip 파일이 아닙니다.")
+        with zf:
+            root_res = str(staging.resolve())
+            for member in zf.namelist():
+                dest = str((staging / member).resolve())
+                # zip-slip 방지: 압축 항목이 staging 밖으로 나가지 못하게 한다.
+                if os.path.commonpath([root_res, dest]) != root_res:
+                    raise ValueError(f"안전하지 않은 경로가 포함된 zip: {member}")
+            zf.extractall(staging)
+
+        root = _resolve_dataset_root(staging)
+        spec = {**raw, "path": str(root), "copy": True}
+        return import_dir(spec)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -864,6 +1137,59 @@ def sample_image_path(dataset_id: str, split, name: str) -> Path:
     if not p.is_file() or p.suffix.lower() not in IMAGE_EXTS:
         raise KeyError(f"이미지를 찾을 수 없습니다: {sp}/{safe}")
     return p
+
+
+def export_zip(dataset_id: str) -> Path:
+    """데이터셋을 **자체 완결형 YOLO 구조 zip** 으로 묶어 경로를 돌려준다.
+
+    빌드/등록/병합 어느 경로로 만든 것이든 `data.yaml` 의 위치 정보로 실제 이미지·라벨
+    폴더를 찾아, 다음 구조로 담는다(추출하면 그대로 학습에 쓸 수 있다)::
+
+        <name>/data.yaml            # path: .  · train/val/test 상대경로 · task · names
+        <name>/{train,valid,test}/{images,labels}/...
+
+    원본을 참조만 하는 등록 데이터셋도 실제 파일을 zip 안에 넣어 **어디서든 쓸 수 있게** 한다.
+    """
+    import zipfile
+
+    manifest = get(dataset_id)               # 존재 검증
+    layout = _yaml_layout(dataset_id)
+    names = layout["names"] or list(manifest.get("class_names") or [])
+    task = layout["task"] or str(manifest.get("task") or "obb")
+    raw_name = str(manifest.get("name") or dataset_id)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-.") or dataset_id
+
+    folder_of = {"train": "train", "val": "valid", "test": "test"}
+    present = {k: v for k, v in layout["splits"].items() if v and Path(v).is_dir()}
+
+    # 추출 위치 기준 상대경로로 다시 쓴 data.yaml (어디서든 동작하도록 path: .)
+    ylines = [
+        f"# NIT_train 데이터셋 내보내기 — {raw_name} ({dataset_id})",
+        f"# 생성 {store.now_iso()}",
+        "path: .",
+    ]
+    for key in ("train", "val", "test"):
+        if key in present:
+            ylines.append(f"{key}: {folder_of[key]}/images")
+    ylines.append(f"task: {task}")
+    ylines.append(f"nc: {len(names)}")
+    ylines.append("names:")
+    ylines += [f"  {i}: {nm}" for i, nm in enumerate(names)] or ["  {}"]
+    yaml_text = "\n".join(ylines) + "\n"
+
+    out = store.dataset_dir(dataset_id) / f"{safe}_export.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{safe}/data.yaml", yaml_text)
+        for key, img_dir in present.items():
+            folder = folder_of.get(key, key)
+            lbl_dir = Path(img_dir).parent / "labels"
+            for img in sorted(Path(img_dir).glob("*")):
+                if img.is_file() and img.suffix.lower() in IMAGE_EXTS:
+                    zf.write(img, arcname=f"{safe}/{folder}/images/{img.name}")
+                    lb = lbl_dir / f"{img.stem}.txt"
+                    if lb.is_file():
+                        zf.write(lb, arcname=f"{safe}/{folder}/labels/{lb.name}")
+    return out
 
 
 def list_datasets() -> list:

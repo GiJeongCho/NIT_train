@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
+# 로컬 배포 설정(.env.example 만 커밋)
+/.env
+docker-compose.override.yml
 
 # 작업 산출물 — 전부 워크스페이스 안에 모인다(용량이 크고 재생성 가능).
 workspace/
@@ -14,3 +17,9 @@ outputs/
 # test_model/ 의 사전학습 가중치는 배포에 필요하므로 예외로 둘지 프로젝트 정책에 따른다.
 # 기본은 제외(수십~수백 MB).
 *.pt
+
+# 외부 데이터셋 원본(약 24,600장). 깃에 올리면 레포가 수 GB 로 부푼다.
+# 이미지/라벨은 제외하고, '무엇이 있어야 하는지' 문서(README)만 추적한다.
+# 학습용 이미지는 임포트 시 workspace 로 복사되므로 이 폴더는 재임포트용 원본일 뿐이다.
+external_datasets/*
+!external_datasets/README.md

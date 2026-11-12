@@ -1,0 +1,11 @@
+# GPU 가 없는 호스트용 오버라이드.
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --build
+# GPU reservation 을 비우고 추론/학습 디바이스를 cpu 로 돌린다(학습은 느리다).
+services:
+  nit-train:
+    environment:
+      NIT_TRAIN_DEVICE: "cpu"
+    deploy:
+      resources:
+        reservations:
+          devices: []

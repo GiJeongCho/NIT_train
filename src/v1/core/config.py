@@ -314,3 +314,31 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings.from_env()
+
+
+# ── 버전/빌드 정보 ──────────────────────────────────────────────────────
+# 배포 추적용. 이미지 빌드 시 docker 가 ARG→ENV 로 심어주고(NIT_TRAIN_VERSION 등),
+# 없으면 프로젝트 루트의 VERSION 파일을 읽는다. /api/meta·/api/version 과 Swagger 에 노출.
+def _read_version_file() -> str:
+    for p in (PROJECT_ROOT / "VERSION", BASE_DIR / "VERSION"):
+        try:
+            t = p.read_text(encoding="utf-8").strip()
+            if t:
+                return t.splitlines()[0].strip()
+        except OSError:
+            continue
+    return "0.0.0"
+
+
+def app_version() -> str:
+    """배포 버전. 이미지에 심은 NIT_TRAIN_VERSION 우선, 없으면 VERSION 파일."""
+    return _env_str("NIT_TRAIN_VERSION", _read_version_file())
+
+
+def build_info() -> dict:
+    """버전 + 빌드 출처(깃 커밋·빌드 시각). 운영에서 '지금 뭐가 떠 있나' 확인용."""
+    return {
+        "version": app_version(),
+        "git_sha": _env_str("NIT_TRAIN_GIT_SHA", ""),
+        "build_date": _env_str("NIT_TRAIN_BUILD_DATE", ""),
+    }

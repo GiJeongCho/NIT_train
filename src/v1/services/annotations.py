@@ -385,6 +385,59 @@ def class_stats(video_id: Optional[str] = None) -> dict:
     return dict(sorted(acc.items(), key=lambda kv: -kv[1]))
 
 
+def project_stats() -> dict:
+    """프로젝트 전체 라벨링 수량 요약(‘데이터 현황’ 화면용).
+
+    영상별 프레임/승인/객체를 한 번에 훑어 합산하고, **승인(학습에 쓰이는) 프레임**의
+    클래스별 객체 수도 함께 낸다. 데이터셋으로 굳히기 전에 지금까지 라벨링된 양과
+    클래스 균형을 한눈에 보기 위한 것이다.
+    """
+    per_video: list = []
+    totals = {"videos": 0, "frames": 0, "approved": 0, "pending": 0,
+              "rejected": 0, "objects": 0, "approved_objects": 0}
+    per_class: dict = {}   # 승인 프레임 기준 클래스별 객체 수(학습에 실제로 쓰이는 양)
+
+    for vid in store.list_video_ids():
+        meta = store.read_json(store.video_meta_path(vid), None)
+        name = (meta or {}).get("original_name") or vid
+        counts = {s: 0 for s in STATUSES}
+        v_frames = v_objects = v_appr_objects = 0
+        for fid in store.list_frame_ids(vid):
+            doc = store.read_json(label_path(vid, fid), None)
+            if not isinstance(doc, dict):
+                continue
+            v_frames += 1
+            st = doc.get("status", "pending")
+            counts[st] = counts.get(st, 0) + 1
+            objs = doc.get("objects") or []
+            v_objects += len(objs)
+            if st == "approved":
+                v_appr_objects += len(objs)
+                for o in objs:
+                    key = o.get("class_name") or "(미확정)"
+                    per_class[key] = per_class.get(key, 0) + 1
+        if v_frames == 0:
+            continue
+        per_video.append({
+            "video_id": vid, "name": name,
+            "frames": v_frames, "approved": counts["approved"],
+            "pending": counts["pending"], "rejected": counts["rejected"],
+            "objects": v_objects, "approved_objects": v_appr_objects,
+            "ready": counts["approved"] > 0,
+        })
+        totals["videos"] += 1
+        totals["frames"] += v_frames
+        totals["approved"] += counts["approved"]
+        totals["pending"] += counts["pending"]
+        totals["rejected"] += counts["rejected"]
+        totals["objects"] += v_objects
+        totals["approved_objects"] += v_appr_objects
+
+    per_video.sort(key=lambda e: -e["approved"])
+    per_class = dict(sorted(per_class.items(), key=lambda kv: -kv[1]))
+    return {"totals": totals, "per_video": per_video, "per_class": per_class}
+
+
 def delete_frame(video_id: str, frame_id: str) -> dict:
     """프레임과 라벨을 완전히 제거한다. (검수에서 '이 장은 못 쓴다' 처리)
 

@@ -28,7 +28,7 @@ from fastapi import APIRouter, Body, File, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.config import get_settings
+from core.config import build_info, get_settings
 from core import store
 from services import (
     annotations,
@@ -73,6 +73,16 @@ async def healthz() -> JSONResponse:
 
 
 @router.get(
+    "/api/version",
+    tags=[_TAG_MISC],
+    summary="버전/빌드 정보",
+    description="배포 추적용. 떠 있는 이미지의 버전·깃 커밋·빌드 시각을 반환한다.",
+)
+async def version() -> JSONResponse:
+    return JSONResponse(build_info())
+
+
+@router.get(
     "/api/meta",
     tags=[_TAG_MISC],
     summary="서버 설정/기본값 조회",
@@ -83,8 +93,10 @@ async def healthz() -> JSONResponse:
 )
 async def meta() -> JSONResponse:
     s = get_settings()
+    bi = build_info()
     return JSONResponse({
-        "version": "1.0.0",
+        "version": bi["version"],
+        "build": bi,
         "workspace": str(s.workspace_dir),
         "device": s.device,
         "default_model": store.rel_to_workspace(s.base_model) or str(s.base_model),
@@ -722,6 +734,16 @@ async def labeling_progress(video_id: str) -> JSONResponse:
 
 
 @router.get(
+    "/api/stats",
+    tags=[_TAG_LABEL],
+    summary="프로젝트 라벨링 수량 요약 (전체 합산 + 클래스 분포)",
+    description="지금까지 라벨링된 프레임/객체 수를 영상별로 합산하고, 승인 프레임 기준 클래스 분포를 낸다. '데이터 현황' 화면용.",
+)
+async def project_stats() -> JSONResponse:
+    return JSONResponse(annotations.project_stats())
+
+
+@router.get(
     "/api/videos/{video_id}/tracks",
     tags=[_TAG_LABEL],
     summary="객체(track) 목록",
@@ -1024,6 +1046,51 @@ async def import_dataset(req: DatasetImportRequest) -> JSONResponse:
     return JSONResponse({"ok": True, **dataset_svc.import_dir(spec)})
 
 
+@router.post(
+    "/api/datasets/import_zip",
+    tags=[_TAG_DATASET],
+    summary="데이터셋 zip 업로드 등록 (드래그앤드롭)",
+    description=(
+        "YOLO 또는 로보플로우 COCO 데이터셋을 **zip 으로 업로드**해 그대로 등록한다.\n\n"
+        "브라우저는 드롭한 폴더의 서버 경로를 알 수 없으므로, 폴더 대신 zip 을 받아 서버에서 "
+        "풀어 `POST /api/datasets/import` 와 동일하게 워크스페이스에 **스냅샷으로 고정**한다"
+        "(COCO 는 YOLO-OBB 로 변환·복사). 참조만 하는 등록은 임시 압축본이 사라지면 깨지므로 "
+        "업로드 경로는 항상 복사한다.\n\n"
+        "zip 안에 단일 상위 폴더가 있어도(`<name>/train/...`) 자동으로 찾아 들어간다. "
+        "`data.yaml` 이 없으면 폴더 구조와 라벨 토큰 수(5=detect, 9=obb)로 태스크를 추정한다."
+    ),
+)
+async def import_dataset_zip(
+    file: UploadFile = File(..., description="YOLO/COCO 데이터셋 zip"),
+    name: Optional[str] = Query(None, description="생략 시 zip 파일 이름"),
+    task: Optional[str] = Query(None, description="obb | detect — 생략 시 자동 추정"),
+) -> JSONResponse:
+    if not (file.filename or "").lower().endswith(".zip"):
+        raise ValueError("zip 파일만 업로드할 수 있습니다.")
+    # 업로드본은 워크스페이스 안(같은 볼륨)에 받아, 풀 때 하드링크가 되고 rename 이 싸다.
+    tmp_dir = store.workspace() / ".import_staging"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(tmp_dir), prefix=".upload-", suffix=".zip")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        # 큰 zip 이 이벤트 루프를 막지 않도록 청크 단위로 await 하며 기록한다.
+        with tmp.open("wb") as f:
+            while True:
+                chunk = await file.read(_CHUNK)
+                if not chunk:
+                    break
+                f.write(chunk)
+        await file.close()
+        spec = {"name": name or Path(file.filename or "").stem or "dataset"}
+        if task:
+            spec["task"] = task
+        return JSONResponse({"ok": True, **dataset_svc.import_zip(tmp, spec)})
+    finally:
+        await file.close()
+        tmp.unlink(missing_ok=True)
+
+
 @router.get(
     "/api/datasets/inspect",
     tags=[_TAG_DATASET],
@@ -1057,6 +1124,18 @@ async def get_dataset_yaml(dataset_id: str) -> Response:
     if not path.exists():
         raise KeyError(f"data.yaml 이 없습니다: {dataset_id}")
     return Response(content=path.read_text(encoding="utf-8"), media_type="text/plain")
+
+
+@router.get(
+    "/api/datasets/{dataset_id}/export",
+    tags=[_TAG_DATASET],
+    summary="데이터셋 내보내기 (zip: data.yaml + train/valid/test)",
+    description="이미지·라벨과 상대경로 data.yaml 을 한 zip 으로 묶어 내려준다. 추출하면 그대로 학습에 쓸 수 있는 자체 완결형 YOLO 폴더다.",
+)
+async def export_dataset(dataset_id: str) -> FileResponse:
+    path = dataset_svc.export_zip(dataset_id)
+    return FileResponse(path, media_type="application/zip",
+                        filename=path.name)
 
 
 @router.delete("/api/datasets/{dataset_id}", tags=[_TAG_DATASET], summary="데이터셋 삭제")
