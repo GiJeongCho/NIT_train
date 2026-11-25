@@ -55,6 +55,34 @@ class State:
             print(f"[runner] state 저장 실패: {e}", flush=True)
 
 
+def _normalize_yaml_path(data_yaml: Path) -> None:
+    """data.yaml 의 `path:` 를 이 파일이 있는 폴더(현재 런타임 절대경로)로 맞춘다.
+
+    데이터셋은 data.yaml 과 같은 폴더에 train/valid/test 가 자족적으로 들어 있다.
+    호스트(Windows, `C:/...`)에서 만든 데이터셋을 컨테이너(`/app/...`)에서 그대로
+    학습하면 박혀 있는 절대경로가 깨지므로, 학습 직전에 자기 위치로 재지정한다.
+    매 실행마다 '지금 이 환경' 기준으로 고치므로 호스트/컨테이너 양쪽에서 동작한다.
+    """
+    try:
+        lines = data_yaml.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    root = data_yaml.parent.as_posix()
+    out, replaced = [], False
+    for line in lines:
+        if line.lstrip().startswith("path:"):
+            out.append(f"path: {root}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.insert(0, f"path: {root}")
+    try:
+        data_yaml.write_text("\n".join(out) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _read_yaml_task(data_yaml: Path) -> str:
     """data.yaml 의 `task:` 값만 가볍게 읽는다(PyYAML 없이도 동작하게)."""
     try:
@@ -131,6 +159,8 @@ def main() -> int:
         if resume:
             model.train(resume=True)
         else:
+            # 호스트에서 만든 데이터셋을 컨테이너에서도 쓸 수 있게 경로를 자기 위치로 보정.
+            _normalize_yaml_path(Path(spec["data"]))
             model.train(
                 data=spec["data"],
                 epochs=int(spec["epochs"]),

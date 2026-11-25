@@ -6,6 +6,12 @@ FROM ultralytics/ultralytics:latest
 
 WORKDIR /app
 
+# opencv-python(헤드리스 아님)은 런타임에 libGL/libglib 을 요구한다. 베이스에 없으면
+# `import cv2` 가 libGL.so.1 로 죽으므로 시스템 라이브러리를 먼저 깐다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 # 의존성 레이어를 먼저 굳혀 소스 변경 시 재설치를 피한다.
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
