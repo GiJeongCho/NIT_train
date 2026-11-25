@@ -47,7 +47,7 @@ def list_models() -> dict:
     promoted = _load()["models"]
     # 옛 승격 기록엔 trained_at 이 없다 → 모델 파일 mtime(만들어진 시각)으로 폴백해 채운다.
     for m in promoted:
-        if not m.get("trained_at"):
+        if not m.get("trained_at") and m.get("origin") != "external_upload":
             try:
                 p = Path(m.get("abs_path") or "")
                 if p.exists():
@@ -141,6 +141,68 @@ def names_from_weights(path: Path) -> Optional[list]:
     return None
 
 
+def inspect_weights(path: Path) -> dict:
+    """업로드한 YOLO 가중치가 실제로 열리는지 확인하고 태스크/클래스 메타를 읽는다."""
+    try:
+        from ultralytics import YOLO
+        model = YOLO(str(path))
+    except Exception as e:  # noqa: BLE001 - 로드 실패 파일은 등록하지 않는다
+        raise ValueError(f"YOLO 가중치로 읽을 수 없습니다: {e}") from e
+    task = str(getattr(model, "task", "") or "").lower()
+    if task not in ("detect", "obb"):
+        raise ValueError(f"지원 태스크는 detect/obb 입니다. 업로드한 모델 태스크: {task or 'unknown'}")
+    raw_names = getattr(model, "names", None)
+    if isinstance(raw_names, dict):
+        names = [str(raw_names[k]) for k in sorted(raw_names, key=lambda x: int(x))]
+    elif isinstance(raw_names, (list, tuple)):
+        names = [str(n) for n in raw_names]
+    else:
+        names = []
+    if not names:
+        raise ValueError("모델에 클래스 이름(names)이 없습니다. 클래스 정보가 포함된 YOLO .pt를 올려 주세요.")
+    return {"task": task, "class_names": names}
+
+
+def register_uploaded(path: Path, *, alias: str, note: str = "") -> dict:
+    """외부 .pt 를 바로 사용할 수 있는 승격 모델로 등록한다."""
+    name = str(alias or "").strip()
+    if not _ALIAS_RE.match(name):
+        raise ValueError("모델 이름은 영문/숫자/.-_ 조합 1~48자로 입력해 주세요.")
+    if Path(path).suffix.lower() != ".pt":
+        raise ValueError("YOLO .pt 파일만 등록할 수 있습니다.")
+    info = inspect_weights(Path(path))
+    doc = _load()
+    if any(m.get("alias") == name for m in doc["models"]) or (store.models_root() / f"{name}.pt").exists():
+        raise ValueError(f"이미 등록된 모델 이름입니다: {name}")
+
+    dest = store.models_root() / f"{name}.pt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, dest)
+    now = store.now_iso()
+    entry = {
+        "alias": name,
+        "path": store.rel_to_workspace(dest),
+        "abs_path": dest.as_posix(),
+        "origin": "external_upload",
+        "task": info["task"],
+        "class_names": info["class_names"],
+        "size_mb": round(dest.stat().st_size / 1e6, 1),
+        "note": str(note or "").strip(),
+        "trained_at": None,
+        "uploaded_at": now,
+        "promoted_at": now,
+        "deployed_to": None,
+    }
+    try:
+        doc["models"].append(entry)
+        doc["models"].sort(key=lambda m: str(m.get("promoted_at") or ""), reverse=True)
+        _save(doc)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    return entry
+
+
 def metadata_yaml(alias: str) -> str:
     """승격 모델과 **함께 내보낼 메타 YAML** 텍스트.
 
@@ -157,7 +219,8 @@ def metadata_yaml(alias: str) -> str:
     lines = [
         f"# NIT_train 모델 메타 (내보내기 동봉용) — 생성 {store.now_iso()}",
         f"# alias: {alias}",
-        f"# 학습 run: {entry.get('run_id')} · 가중치: {entry.get('which')}",
+        ("# 외부 업로드 모델" if entry.get("origin") == "external_upload"
+         else f"# 학습 run: {entry.get('run_id')} · 가중치: {entry.get('which')}"),
         f"# 데이터셋: {entry.get('dataset_name') or ''} ({entry.get('dataset_id') or ''})",
         f"# 기반 가중치: {entry.get('base_model') or ''}"
         + (f" · mAP50: {round(float(map50), 4)}" if map50 is not None else ""),

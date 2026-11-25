@@ -85,7 +85,9 @@ def _resolve_spec(raw: Optional[dict]) -> dict:
     if mode not in SPLIT_MODES:
         raise ValueError(f"split_mode 는 {list(SPLIT_MODES)} 중 하나여야 합니다: {mode!r}")
 
-    ratios = raw.get("splits") or s.splits()
+    # 라벨 검수가 끝나기 전에는 train/valid/test 를 나누지 않는다.
+    # 분할은 4. 데이터셋 상세 화면에서 검수 후 명시적으로 실행한다.
+    ratios = raw.get("splits") or {"train": 1.0, "valid": 0.0, "test": 0.0}
     try:
         ratios = {k: max(0.0, float(ratios.get(k, 0.0))) for k in SPLITS}
     except (TypeError, ValueError, AttributeError):
@@ -1123,6 +1125,148 @@ def samples(dataset_id: str, split="train", offset: int = 0, limit: int = 24) ->
                 objs = []
         out["items"].append({"name": name, "objects": objs, "n": len(objs)})
     return out
+
+
+def split_existing(dataset_id: str, raw: Optional[dict] = None) -> dict:
+    """검수된 워크스페이스 데이터셋을 지정 비율로 train/valid/test 재분할한다.
+
+    데이터는 새로 복사하지 않고 임시 영역에 하드링크를 구성한 뒤 split 폴더를 교체한다.
+    원본 외부 폴더를 참조하는(import copy=false) 데이터셋은 원본 보호를 위해 거부한다.
+    """
+    raw = dict(raw or {})
+    manifest = get(dataset_id)
+    layout = _yaml_layout(dataset_id)
+    root = store.dataset_dir(dataset_id).resolve()
+    external = layout["root"].resolve() != root
+
+    mode = str(raw.get("mode") or "chunk").lower()
+    if mode not in ("chunk", "random"):
+        raise ValueError("분할 방식은 chunk 또는 random 이어야 합니다.")
+    ratios = raw.get("splits") or {"train": 0.8, "valid": 0.15, "test": 0.05}
+    try:
+        ratios = {k: max(0.0, float(ratios.get(k, 0.0))) for k in SPLITS}
+    except (TypeError, ValueError, AttributeError):
+        raise ValueError("비율은 train/valid/test 숫자로 입력해 주세요.")
+    total_ratio = sum(ratios.values())
+    if total_ratio <= 0:
+        raise ValueError("분할 비율의 합은 0보다 커야 합니다.")
+    ratios = {k: v / total_ratio for k, v in ratios.items()}
+    seed = int(raw.get("seed", 0))
+    chunk_size = max(1, int(raw.get("chunk_size", 30)))
+
+    files = []
+    for split in ("train", "val", "test"):
+        image_dir = layout["splits"].get(split)
+        if image_dir and image_dir.is_dir():
+            files.extend(p for p in image_dir.iterdir()
+                         if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    files = sorted({p.resolve() for p in files}, key=lambda p: (p.name.casefold(), str(p).casefold()))
+    if not files:
+        raise ValueError("분할할 이미지가 없습니다.")
+
+    rng = random.Random(seed)
+    active = [k for k in SPLITS if ratios[k] > 0]
+    if len(files) < len(active):
+        raise ValueError("선택한 세트 수보다 이미지 수가 적습니다.")
+    chunk_size = min(chunk_size, max(1, round(len(files) * min(ratios[k] for k in active))))
+    if mode == "random":
+        groups = [[p] for p in files]
+    else:
+        groups = [files[i:i + chunk_size] for i in range(0, len(files), chunk_size)]
+    rng.shuffle(groups)
+    assigned = {k: [] for k in SPLITS}
+    wanted = {k: ratios[k] * len(files) for k in SPLITS}
+    for i, group in enumerate(groups):
+        empty = [k for k in active if not assigned[k]]
+        available = empty if len(groups) - i == len(empty) else active
+        target = max(available, key=lambda k: wanted[k] - len(assigned[k])) if available else "train"
+        assigned[target].extend(group)
+
+    stage = root / f".split-stage-{store.new_id()}"
+    backup = root / f".split-backup-{store.new_id()}"
+    counts = {k: 0 for k in SPLITS}
+    objects = {k: 0 for k in SPLITS}
+    class_hist: Dict[str, int] = {}
+    names = layout["names"] or list(manifest.get("class_names") or [])
+    task = layout["task"] or str(manifest.get("task") or "obb")
+    spec = {"name": manifest.get("name") or dataset_id, "task": task,
+            "class_names": names}
+    for split in SPLITS:
+        (stage / split / "images").mkdir(parents=True, exist_ok=True)
+        (stage / split / "labels").mkdir(parents=True, exist_ok=True)
+
+    try:
+        for split in SPLITS:
+            for image in assigned[split]:
+                filename = image.name
+                suffix = 1
+                while (stage / split / "labels" / (Path(filename).stem + ".txt")).exists():
+                    filename = f"{image.stem}_{suffix}{image.suffix}"
+                    suffix += 1
+                _place_image(image, stage / split / "images" / filename, link=not external)
+                src_label = image.parent.parent / "labels" / f"{image.stem}.txt"
+                text = src_label.read_text(encoding="utf-8", errors="replace") if src_label.is_file() else ""
+                dest_label = stage / split / "labels" / (Path(filename).stem + ".txt")
+                dest_label.write_text(text, encoding="utf-8")
+                parsed = _remap_label(text, list(range(len(names))), names, class_hist)
+                objects[split] += len(parsed)
+                counts[split] += 1
+
+        # 교체 전 모든 산출물을 준비해 놓는다. 실패 시 이전 split 폴더를 되돌린다.
+        _write_yaml(stage / "data.yaml", root, spec, counts)
+        backup.mkdir()
+        moved_old = []
+        moved_new = []
+        yaml_path = store.dataset_yaml_path(dataset_id)
+        yaml_backed_up = False
+        try:
+            for split in SPLITS:
+                old_dir = root / split
+                if old_dir.exists():
+                    shutil.move(str(old_dir), str(backup / split))
+                    moved_old.append(split)
+            for split in SPLITS:
+                shutil.move(str(stage / split), str(root / split))
+                moved_new.append(split)
+            if yaml_path.exists():
+                shutil.move(str(yaml_path), str(backup / "data.yaml"))
+                yaml_backed_up = True
+            os.replace(stage / "data.yaml", yaml_path)
+            updated = dict(manifest)
+            if external:
+                updated["copied"] = True
+                updated["spec"] = {**manifest.get("spec", {}), "copy": True}
+            updated.update({
+                "counts": counts,
+                "objects": objects,
+                "total_frames": sum(counts.values()),
+                "total_objects": sum(objects.values()),
+                "class_histogram": dict(sorted(class_hist.items(), key=lambda kv: -kv[1])),
+                "split_config": {"mode": mode, "splits": ratios, "seed": seed,
+                                 "chunk_size": chunk_size},
+            })
+            warnings = [w for w in (manifest.get("warnings") or [])
+                        if "valid 세트가 없습니다" not in w and "valid split가 없습니다" not in w
+                        and not (external and "원본 폴더를 그대로 참조" in w)]
+            if counts["valid"] == 0:
+                warnings.append("valid 세트가 없습니다. 학습 중 검증과 best 모델 선택을 할 수 없습니다.")
+            updated["warnings"] = warnings
+            store.write_json(store.dataset_manifest_path(dataset_id), updated)
+        except Exception:
+            for split in moved_new:
+                shutil.rmtree(root / split, ignore_errors=True)
+            for split in moved_old:
+                old_backup = backup / split
+                if old_backup.exists():
+                    shutil.move(str(old_backup), str(root / split))
+            if yaml_backed_up and (backup / "data.yaml").exists():
+                yaml_path.unlink(missing_ok=True)
+                shutil.move(str(backup / "data.yaml"), str(yaml_path))
+            raise
+        return updated
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def sample_image_path(dataset_id: str, split, name: str) -> Path:

@@ -70,13 +70,8 @@ def _env_list(name: str, default: list) -> list:
 # tracker_py 의 OBB 학습 데이터셋(train_data/preprocessed_obb/data.yaml)과 동일한 순서를
 # 기본값으로 둔다. 클래스 인덱스가 어긋나면 기존 데이터셋과 합칠 수 없기 때문이다.
 DEFAULT_CLASS_NAMES = [
-    "Ikv_91_105",
-    "Jagdtiger",
-    "Panther_II",
-    "Strv_101",
-    "Strv_103A",
-    "Tiger_II_10.5_",
-    "VIDAR",
+    "K9", "M48", "K200", "BMP-3", "T-90", "Chunma-92ra",
+    "Chunma-2", "T-34-85", "T55A", "T62-M", "T-72", "Type59",
 ]
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg"}

@@ -116,8 +116,11 @@ def get_meta(video_id: str) -> dict:
 
 
 def source_path(video_id: str) -> Path:
-    p = Path(get_meta(video_id).get("path", ""))
-    if not p.exists():
+    raw = str(get_meta(video_id).get("path") or "").strip()
+    if not raw:
+        raise FileNotFoundError("원본 영상은 라벨링 패키지에 포함되지 않았습니다. 저장된 프레임 라벨은 계속 편집할 수 있습니다.")
+    p = Path(raw)
+    if not p.is_file():
         raise FileNotFoundError(f"원본 영상 파일이 사라졌습니다: {p}")
     return p
 

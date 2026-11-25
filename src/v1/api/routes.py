@@ -24,7 +24,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, File, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Body, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +37,7 @@ from services import (
     dataset as dataset_svc,
     detector as detector_svc,
     jobs,
+    label_bundle,
     propagate as propagate_svc,
     registry,
     segments as segments_svc,
@@ -148,6 +149,15 @@ class ClassesRequest(BaseModel):
     class_names: List[str] = Field(..., description="클래스 목록. 기존 순서 유지 + 뒤에 추가만 허용")
 
 
+class TankRequest(BaseModel):
+    name: str
+
+
+@router.post("/api/classes/tanks", tags=[_TAG_MISC], summary="라벨링 차종 추가")
+async def add_tank(req: TankRequest) -> JSONResponse:
+    return JSONResponse(classes_svc.add_tank(req.name))
+
+
 @router.get(
     "/api/classes",
     tags=[_TAG_MISC],
@@ -211,6 +221,39 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
         await file.close()
         tmp.unlink(missing_ok=True)
     return JSONResponse({"ok": True, **meta})
+
+
+@router.post("/api/videos/labeling/import", tags=[_TAG_VIDEO],
+             summary="다른 NIT_train에서 내보낸 라벨링 작업 가져오기")
+async def import_labeling_bundle(file: UploadFile = File(...)) -> JSONResponse:
+    if Path(file.filename or "").suffix.lower() != ".zip":
+        raise ValueError("라벨링 내보내기 zip 파일을 선택해 주세요.")
+    staging = store.workspace() / ".label_bundle_uploads"
+    staging.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(dir=str(staging), prefix=".upload-", suffix=".zip")
+    os.close(fd)
+    temp = Path(temp_name)
+    try:
+        with temp.open("wb") as out:
+            while True:
+                chunk = await file.read(_CHUNK)
+                if not chunk:
+                    break
+                out.write(chunk)
+        return JSONResponse({"ok": True, **label_bundle.import_zip(temp)})
+    finally:
+        await file.close()
+        temp.unlink(missing_ok=True)
+
+
+@router.get("/api/videos/{video_id}/labeling/export", tags=[_TAG_VIDEO],
+            summary="편집 가능한 라벨링 작업 내보내기")
+async def export_labeling_bundle(
+    video_id: str,
+    include_video: bool = Query(False, description="원본 영상까지 zip에 포함 (용량 증가)")
+) -> FileResponse:
+    path = label_bundle.export_zip(video_id, include_video=include_video)
+    return FileResponse(path, media_type="application/zip", filename=path.name)
 
 
 @router.post(
@@ -757,6 +800,11 @@ async def list_tracks(video_id: str) -> JSONResponse:
     return JSONResponse({"video_id": video_id, "items": annotations.tracks(video_id)})
 
 
+@router.delete("/api/videos/{video_id}/tracks/{track_id}", tags=[_TAG_LABEL])
+async def unlink_track(video_id: str, track_id: int) -> JSONResponse:
+    return JSONResponse(annotations.unlink_track(video_id, track_id))
+
+
 @router.get("/api/videos/{video_id}/frames/{frame_id}", tags=[_TAG_LABEL], summary="프레임 라벨 조회")
 async def get_frame(video_id: str, frame_id: str) -> JSONResponse:
     return JSONResponse(annotations.load(video_id, frame_id))
@@ -981,11 +1029,18 @@ class DatasetRequest(BaseModel):
     class_names: Optional[List[str]] = Field(None, description="생략 시 프로젝트 클래스 목록")
     include_kinds: Optional[List[str]] = Field(None, description="기본 ['normal']")
     only_approved: Optional[bool] = Field(None, description="기본 true (승인된 프레임만)")
-    splits: Optional[dict] = Field(None, description='{"train":0.8,"valid":0.15,"test":0.05}')
+    splits: Optional[dict] = Field(None, description="생략 시 분할 보류(train=1.0). 분할은 검수 후 별도 실행.")
     split_mode: Optional[str] = Field(None, description="chunk | random | video")
     chunk_size: Optional[int] = Field(None, ge=1)
     seed: Optional[int] = None
     link_images: Optional[bool] = Field(None, description="하드링크로 디스크 절약(기본 true)")
+
+
+class DatasetSplitRequest(BaseModel):
+    splits: dict = Field(default_factory=lambda: {"train": 0.8, "valid": 0.15, "test": 0.05})
+    mode: str = Field("chunk", description="chunk | random")
+    chunk_size: int = Field(30, ge=1, le=10000)
+    seed: int = 0
 
 
 @router.post(
@@ -996,8 +1051,9 @@ class DatasetRequest(BaseModel):
         "선택한 영상들의 **승인된** 라벨을 모아 ultralytics 학습용 데이터셋 스냅샷을 만든다.\n\n"
         "- 이미지를 데이터셋 폴더로 링크/복사해 고정한다 → 나중에 라벨을 고쳐도 이미 "
         "학습한 데이터셋은 변하지 않는다(실험 재현성).\n"
-        "- 분할 기본값 `chunk`: 연속 프레임을 블록으로 묶어 배분한다. 무작위로 나누면 "
-        "train/valid 에 사실상 같은 장면이 들어가 검증 점수가 부풀려진다.\n"
+        "- 새 영상 프레임은 기본적으로 모두 train 에 모은다. 라벨 검수 후 "
+        "`POST /api/datasets/{id}/split` 또는 4. 데이터셋 상세에서 train/valid/test 를 분할한다.\n"
+        "- 분할 기본값 `chunk`: 연속 프레임을 블록으로 묶어 배분해 검증 데이터 누수를 줄인다.\n"
         "- 클래스가 미확정인 객체가 있는 프레임은 통째로 제외되고 `excluded` 에 집계된다.\n"
         "- `base_datasets` 로 기존 데이터셋(또는 `train_data/preprocessed_obb` 같은 폴더)을 "
         "같이 넣을 수 있다. 기존 자산 + 새로 라벨한 프레임을 합쳐 학습하는 실제 운용 흐름이다. "
@@ -1106,6 +1162,12 @@ async def inspect_dataset_dir(
 @router.get("/api/datasets", tags=[_TAG_DATASET], summary="데이터셋 목록")
 async def list_datasets() -> JSONResponse:
     return JSONResponse({"items": dataset_svc.list_datasets()})
+
+
+@router.post("/api/datasets/{dataset_id}/split", tags=[_TAG_DATASET],
+             summary="검수한 데이터셋을 train/valid/test로 분할")
+async def split_dataset(dataset_id: str, req: DatasetSplitRequest) -> JSONResponse:
+    return JSONResponse({"ok": True, **dataset_svc.split_existing(dataset_id, req.model_dump())})
 
 
 @router.get(
@@ -1319,6 +1381,41 @@ async def delete_run(run_id: str) -> JSONResponse:
 )
 async def list_models() -> JSONResponse:
     return JSONResponse(registry.list_models())
+
+
+@router.post("/api/models/upload", tags=[_TAG_MODEL],
+             summary="외부 YOLO .pt 업로드 후 사용 가능 모델로 등록")
+async def upload_model(
+    file: UploadFile = File(...),
+    alias: str = Form(..., description="6. 모델에 표시할 이름 (영문/숫자/.-_)"),
+    note: str = Form(""),
+) -> JSONResponse:
+    if Path(file.filename or "").suffix.lower() != ".pt":
+        raise ValueError(".pt 파일만 업로드할 수 있습니다.")
+    upload_dir = store.models_root() / ".uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(dir=str(upload_dir), prefix=".model-", suffix=".pt")
+    os.close(fd)
+    temp = Path(temp_name)
+    total = 0
+    max_bytes = 8 * 1024 * 1024 * 1024
+    try:
+        with temp.open("wb") as out:
+            while True:
+                chunk = await file.read(_CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("모델 업로드 최대 크기(8GiB)를 초과했습니다.")
+                out.write(chunk)
+        if total == 0:
+            raise ValueError("빈 파일은 등록할 수 없습니다.")
+        entry = registry.register_uploaded(temp, alias=alias, note=note)
+        return JSONResponse({"ok": True, **entry})
+    finally:
+        await file.close()
+        temp.unlink(missing_ok=True)
 
 
 class PromoteRequest(BaseModel):

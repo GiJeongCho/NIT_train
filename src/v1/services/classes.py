@@ -62,7 +62,24 @@ def put(class_names) -> dict:
             f"클래스는 삭제할 수 없습니다(기존 {len(cur)}개 → 요청 {len(new)}개). "
             "이미 저장된 라벨의 클래스 id 가 인덱스이므로 순서가 어긋납니다."
         )
-    doc = {"class_names": new, "updated_at": store.now_iso()}
+    doc = {**get(), "class_names": new, "updated_at": store.now_iso()}
+    store.write_json(_path(), doc)
+    return doc
+
+
+def add_tank(name: str) -> dict:
+    name = name.strip()
+    if not name or len(name) > 80 or not name.isprintable():
+        raise ValueError("차종명은 1~80자의 한 줄 텍스트로 입력하세요.")
+    doc = get()
+    classes = doc["class_names"]
+    if name not in classes:
+        classes.append(name)
+    idx = classes.index(name)
+    extra = doc.setdefault("tank_class_ids", [])
+    if idx not in extra:
+        extra.append(idx)
+    doc["updated_at"] = store.now_iso()
     store.write_json(_path(), doc)
     return doc
 

@@ -239,6 +239,19 @@ def propagate_class(video_id: str, *, track_id: int, class_name: str,
             "frames": changed_frames, "objects": changed_objects}
 
 
+def unlink_track(video_id: str, track_id: int) -> dict:
+    count = 0
+    for fid in store.list_frame_ids(video_id):
+        doc = load(video_id, fid)
+        matches = [o for o in doc.get("objects", []) if o.get("track_id") == track_id]
+        if matches:
+            for o in matches:
+                o["track_id"] = None
+            save(video_id, fid, doc)
+            count += len(matches)
+    return {"objects": count}
+
+
 def tracks(video_id: str) -> List[dict]:
     """영상 안의 track_id 요약. 프런트의 "객체별 라벨링" 패널용."""
     acc: dict = {}

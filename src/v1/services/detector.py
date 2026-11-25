@@ -434,6 +434,13 @@ def list_weights() -> List[dict]:
     s = get_settings()
     items: List[dict] = []
     seen: set = set()
+    registry_doc = store.read_json(store.registry_path(), {})
+    promoted_meta = {}
+    for entry in (registry_doc.get("models") or []) if isinstance(registry_doc, dict) else []:
+        try:
+            promoted_meta[Path(entry.get("abs_path") or "").resolve()] = entry
+        except (OSError, TypeError, ValueError):
+            continue
 
     def add(p: Path, origin: str) -> None:
         rp = p.resolve()
@@ -441,12 +448,15 @@ def list_weights() -> List[dict]:
             return
         seen.add(rp)
         st = p.stat()
+        meta = promoted_meta.get(rp, {})
         items.append({
             "path": store.rel_to_workspace(p) or p.as_posix(),
             "abs_path": p.as_posix(),
             "name": p.name,
             "origin": origin,
-            "task": infer_task(p) or "detect",
+            "task": meta.get("task") or infer_task(p) or "detect",
+            "class_names": meta.get("class_names") or [],
+            "registration": meta.get("origin"),
             "size_mb": round(st.st_size / 1e6, 1),
             # 파일 생성/수정 시각 = 이 가중치가 만들어진 때. run best.pt 는 학습 완료 시각.
             "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
